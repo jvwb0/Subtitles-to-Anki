@@ -38,3 +38,9 @@ def record_loopback(duration_sec: int) -> bytes:
     p.terminate()
 
     return b"".join(frames)
+
+def process_audio(): 
+
+
+    
+#def transcribe(model: WhisperModel):
