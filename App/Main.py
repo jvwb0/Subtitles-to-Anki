@@ -1,21 +1,19 @@
 import os
-from random import sample
 import sys
 import argparse
 import queue
 import sounddevice as sd
-import numpy
+import numpy 
 import wave
+import pyaudiowpatch #because sounddevice doesnt supprot loopback recording on windows WASAPI
+
 
 
 'first we need to install Sounddevice to record audio from the screen,'
 ' then numPy to save audio data as an array,'
 ' and finally we will install Whisper to transcribe the audio into text'
 'all this in a virtual environment to keep our dependencies organized'
-import sounddevice as sd
-import numpy as np
-import wave
-import pyaudiowpatch as pyaudio
+
 
 DURATION = 5          # seconds
 RATE = 48000
