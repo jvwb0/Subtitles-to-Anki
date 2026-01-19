@@ -1,11 +1,8 @@
-import os
-import sys
-import argparse
-import queue
 import sounddevice as sd
 import numpy 
 import wave
 import pyaudiowpatch #because sounddevice doesnt supprot loopback recording on windows WASAPI
+'(Loopback = record the speaker output as input)'
 
 
 
@@ -14,28 +11,24 @@ import pyaudiowpatch #because sounddevice doesnt supprot loopback recording on w
 ' and finally we will install Whisper to transcribe the audio into text'
 'all this in a virtual environment to keep our dependencies organized'
 
-
 DURATION = 5          # seconds
 RATE = 48000
 CHANNELS = 2
 CHUNK = 1024
+DEVICE = 10  # Speakers : python -m pyaudiowpatch (to list devices)
+frames = []
 
-LOOPBACK_DEVICE_INDEX = 10  # Speakers (Realtek) [Loopback]
-
-p = pyaudio.PyAudio()
-
+p = pyaudiowpatch.PyAudio()
 stream = p.open(
-    format=pyaudio.paInt16,
+    format=pyaudiowpatch.paInt16,
     channels=CHANNELS,
     rate=RATE,
     input=True,
     frames_per_buffer=CHUNK,
-    input_device_index=LOOPBACK_DEVICE_INDEX,
-)
+    input_device_index=DEVICE)
 
-frames = []
+print("\nRecording system audio...\n")
 
-print("Recording system audio...")
 for _ in range(int(RATE / CHUNK * DURATION)):
     frames.append(stream.read(CHUNK))
 
