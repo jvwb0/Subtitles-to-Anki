@@ -1,10 +1,9 @@
-import sounddevice as sd
+#import sounddevice as sd
 import numpy 
 import wave
+from faster_whisper import WhisperModel
 import pyaudiowpatch #because sounddevice doesnt supprot loopback recording on windows WASAPI
 '(Loopback = record the speaker output as input)'
-
-
 
 'first we need to install Sounddevice to record audio from the screen,'
 ' then numPy to save audio data as an array,'
