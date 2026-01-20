@@ -30,8 +30,14 @@ def openLoopbackStream(p: pyaudiowpatch.PyAudio):
 
 def recordFrames(stream, durationSec: int) -> list[bytes]:
     frames: list[bytes] = []
-    for _ in range(int(RATE / CHUNK * durationSec)):
-        frames.append(stream.read(CHUNK))
+    secondsRecorded = 0.0
+    secondsPerChunk = CHUNK / RATE
+
+    while secondsRecorded < durationSec:
+        data = stream.read(CHUNK)
+        frames.append(data)
+        secondsRecorded += secondsPerChunk
+
     return frames
 
 def saveWav(frames: list[bytes]) -> None:
@@ -39,9 +45,17 @@ def saveWav(frames: list[bytes]) -> None:
         wf.setnchannels(CHANNELS)
         wf.setsampwidth(2)  # 16-bit
         wf.setframerate(RATE)
-        wf.writeframes(b"".join(frames))
+        wf.writeframes(b"".join(frames)) # raw PCM bytes
 
     print("Saved WAV file", filename)
+
+def readWavStream(filename: str):
+    with wave.open(filename, "rb") as wf:
+        while True:
+            data = wf.readframes(CHUNK)
+            if not data:
+                break
+            print(len(data))
 
 def main():
     p = pyaudiowpatch.PyAudio()
@@ -54,6 +68,7 @@ def main():
     stream.close()
     p.terminate()
 
-    saveWav(frames)
+    saveWav(frames)                         #save to file
+    readWavStream(filename)                 #read from file to check if we got what we wanted
 
 if __name__ == "__main__": main()
