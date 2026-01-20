@@ -1,4 +1,6 @@
 #import sounddevice as sd
+from calendar import c
+from ctypes.util import test
 import numpy 
 import wave
 from faster_whisper import WhisperModel
@@ -17,6 +19,9 @@ CHUNK = 1024
 DEVICE = 10  # Speakers : python -m pyaudiowpatch (to list devices)
 frames = []
 
+counter = 1
+filename = f"test{counter}.wav"
+
 def openLoopbackStream(p: pyaudiowpatch.PyAudio):
     return p.open(
         format=pyaudiowpatch.paInt16,
@@ -32,14 +37,26 @@ def recordFrames(stream, durationSec: int) -> list[bytes]:
         frames.append(stream.read(CHUNK))
     return frames
 
-stream.stop_stream()
-stream.close()
-p.terminate()
+def saveWav(filename: str, frames: list[bytes]) -> None:
+    counter += 1
+    with wave.open(filename, "wb") as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(RATE)
+        wf.writeframes(b"".join(frames))
 
-with wave.open("test.wav", "wb") as wf:
-    wf.setnchannels(CHANNELS)
-    wf.setsampwidth(2)  # 16-bit
-    wf.setframerate(RATE)
-    wf.writeframes(b"".join(frames))
+def main():
+    p = pyaudiowpatch.PyAudio()
+    stream = openLoopbackStream(p)
 
-print("Saved test.wav")
+    print("\nRecording System Audio.........\n")
+    frames = recordFrames(stream, DURATION)
+
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+
+    saveWav(frames)
+    print("Saved WAV file:", filename)
+
+if __name__ == "__main__": main()
