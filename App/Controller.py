@@ -17,6 +17,9 @@ class TranscriptionController:
     def stopAndTranscribe(self):
         self.isRecording = False
         wav_path = self.recorder.stop()
-        audio = prepareAudioFromWav(wav_path)
+        audio = prepareAudioFromWav(filename= wav_path)
         return transcribeAudio(self.model, audio)
 
+    def captureTick(self):
+        if self.isRecording:
+            self.recorder.readChunk()
