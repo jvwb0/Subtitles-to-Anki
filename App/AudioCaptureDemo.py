@@ -17,19 +17,20 @@ CHUNK = 1024
 DEVICE = 10  # Speakers : python -m pyaudiowpatch (to list devices)
 frames = []
 
-p = pyaudiowpatch.PyAudio()
-stream = p.open(
-    format=pyaudiowpatch.paInt16,
-    channels=CHANNELS,
-    rate=RATE,
-    input=True,
-    frames_per_buffer=CHUNK,
-    input_device_index=DEVICE)
+def openLoopbackStream(p: pyaudiowpatch.PyAudio):
+    return p.open(
+        format=pyaudiowpatch.paInt16,
+        channels=CHANNELS,
+        rate=RATE,
+        input=True,
+        frames_per_buffer=CHUNK,
+        input_device_index=DEVICE,)
 
-print("\nRecording system audio...\n")
-
-for _ in range(int(RATE / CHUNK * DURATION)):
-    frames.append(stream.read(CHUNK))
+def recordFrames(stream, durationSec: int) -> list[bytes]:
+    frames: list[bytes] = []
+    for _ in range(int(RATE / CHUNK * durationSec)):
+        frames.append(stream.read(CHUNK))
+    return frames
 
 stream.stop_stream()
 stream.close()
