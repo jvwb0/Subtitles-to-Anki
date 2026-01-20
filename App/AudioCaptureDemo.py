@@ -57,7 +57,7 @@ def saveWav(frames: list[bytes]) -> None:
 #                break
 #            print(len(data))
 
-def main():
+def captureAudio() -> list[bytes]:
     p = pyaudiowpatch.PyAudio()
     stream = openLoopbackStream(p)
 
@@ -68,6 +68,10 @@ def main():
     stream.close()
     p.terminate()
 
+    return frames
+
+def main():
+    frames = captureAudio()               #record audio from system
     saveWav(frames)                         #save to file
     #readWavStream(filename)                 #read from file to check if we got what we wanted
 # out put from demo was 4096 bytes per chunk,
