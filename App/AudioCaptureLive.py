@@ -8,7 +8,7 @@ import pyaudiowpatch #because sounddevice doesnt supprot loopback recording on w
 # and finally we will install Whisper to transcribe the audio into text'
 # all this in a virtual environment to keep our dependencies organized'
 
-class AudioCapture:
+class AudioCaptureLive:
     def __init__(self, rate: int = 48000, channels: int = 2, chunk: int = 1024, device: int = 10):
         self.rate = rate
         self.channels = channels
@@ -22,7 +22,7 @@ class AudioCapture:
 
     def start(self, filename = None):
         self.frames = []
-        self.filename = filename or  f"test_{int(time.time())}.wav"
+        self.filename = filename or  f"live_{int(time.time())}.wav"
 
         self.p = pyaudiowpatch.PyAudio()
         self.stream = self.p.open(
