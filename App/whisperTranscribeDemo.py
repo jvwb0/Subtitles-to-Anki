@@ -22,11 +22,17 @@ def bytesToNumpyArray(data: bytes) -> np.ndarray:
 def transcribeAudio(audio: np.ndarray) -> None:
     model = WhisperModel(MODEL_SIZE, device="cpu",compute_type="int8",)
 
-    segments, info = model.transcribe(audio, beam_size=10, best_of=5, vad_filter=True, )
+    segments, info = model.transcribe(
+        audio,
+        beam_size=10, 
+        best_of=5, 
+        vad_filter=True,
+        word_timestamps=True)
 
     print("Detected language:", info.language)
     for segment in segments:
-        print(segment.text)
+        for w in segment.words:
+            print(w.word, w.start, w.end, )
 
 def loadWavAsBytes(filename: str) -> bytes:
     with wave.open(filename, "rb") as wf:
