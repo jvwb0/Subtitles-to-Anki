@@ -10,7 +10,7 @@ import pyaudiowpatch #because sounddevice doesnt supprot loopback recording on w
 # and finally we will install Whisper to transcribe the audio into text'
 # all this in a virtual environment to keep our dependencies organized'
 
-DURATION = 15          # seconds
+DURATION = 20          # seconds
 RATE = 48000
 CHANNELS = 2
 CHUNK = 1024
@@ -49,13 +49,13 @@ def saveWav(frames: list[bytes]) -> None:
 
     print("Saved WAV file", filename)
 
-def readWavStream(filename: str):
-    with wave.open(filename, "rb") as wf:
-        while True:
-            data = wf.readframes(CHUNK)
-            if not data:
-                break
-            print(len(data))
+#def readWavStream(filename: str):
+#    with wave.open(filename, "rb") as wf:
+#        while True:
+#            data = wf.readframes(CHUNK)
+#            if not data:
+#                break
+#            print(len(data))
 
 def main():
     p = pyaudiowpatch.PyAudio()
