@@ -10,8 +10,8 @@ CHANNELS = 2
 CHUNK = 1024
 DURATION = 10
 
-MODEL_SIZE = "tiny" 
-LANGUAGE = "pt" # Portuguese - we can change this as needed
+MODEL_SIZE = "small" 
+#LANGUAGE = "pt" # Portuguese - we can change this as needed
 
 def bytesToNumpyArray(data: bytes) -> np.ndarray:
     audio = np.frombuffer(data, dtype=np.int16)
@@ -22,7 +22,7 @@ def bytesToNumpyArray(data: bytes) -> np.ndarray:
 def transcribeAudio(audio: np.ndarray) -> None:
     model = WhisperModel(MODEL_SIZE, device="cpu",compute_type="int8",)
 
-    segments, info = model.transcribe(audio, beam_size=5)
+    segments, info = model.transcribe(audio, beam_size=10, best_of=5)
 
     print("Detected language:", info.language)
     for segment in segments:
@@ -43,7 +43,7 @@ def resampleAudio(audio: np.ndarray, srcRate: int) -> np.ndarray:
     return np.interp(xNew, xOld, audio).astype(np.float32)
 
 
-data = loadWavAsBytes("test_1768909877.wav")
+data = loadWavAsBytes("test_1768911908.wav")
 audio = bytesToNumpyArray(data)
 audio = resampleAudio(audio, RATE)
 transcribeAudio(audio)
