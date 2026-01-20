@@ -3,12 +3,12 @@ import time
 import wave
 from faster_whisper import WhisperModel
 import pyaudiowpatch #because sounddevice doesnt supprot loopback recording on windows WASAPI
-'(Loopback = record the speaker output as input)'
+# (Loopback = record the speaker output as input)'
 
-'first we need to install Sounddevice to record audio from the screen,'
-' then numPy to save audio data as an array,'
-' and finally we will install Whisper to transcribe the audio into text'
-'all this in a virtual environment to keep our dependencies organized'
+# first we need to install Sounddevice to record audio from the screen,'
+# then numPy to save audio data as an array,'
+# and finally we will install Whisper to transcribe the audio into text'
+# all this in a virtual environment to keep our dependencies organized'
 
 DURATION = 5          # seconds
 RATE = 48000
@@ -70,5 +70,9 @@ def main():
 
     saveWav(frames)                         #save to file
     readWavStream(filename)                 #read from file to check if we got what we wanted
-
+# out put from demo was 4096 bytes per chunk,
+# each chunk is 1024 samples, each sample is 2 bytes (16 bit audio), stereo = 2 channels
+# 1024 samples * 2 bytes * 2 channels = 4096 bytes
+# so demo was a sucess, we recorded audio, verified the correct data sizes
+# now we can move on to transcribing the audio with Whisper
 if __name__ == "__main__": main()
