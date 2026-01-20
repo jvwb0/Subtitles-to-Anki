@@ -10,7 +10,7 @@ import pyaudiowpatch #because sounddevice doesnt supprot loopback recording on w
 # and finally we will install Whisper to transcribe the audio into text'
 # all this in a virtual environment to keep our dependencies organized'
 
-DURATION = 5          # seconds
+DURATION = 15          # seconds
 RATE = 48000
 CHANNELS = 2
 CHUNK = 1024
