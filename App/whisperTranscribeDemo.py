@@ -1,6 +1,6 @@
 import numpy as np
 import wave
-import pyaudiowpatch
+from Word_obj import Word
 from faster_whisper import WhisperModel
 
 # loopback recording settings
@@ -19,24 +19,28 @@ def bytesToNumpyArray(data: bytes) -> np.ndarray:
     audio = audio.astype(np.float32) / 32768.0
     return audio
 
-def transcribeAudio(audio: np.ndarray) -> None:
+def loadWavAsBytes(filename: str) -> bytes:
+    with wave.open(filename, "rb") as wf:
+        return wf.readframes(wf.getnframes())
+    
+def transcribeAudio(audio: np.ndarray) ->  list[Word]:
     model = WhisperModel(MODEL_SIZE, device="cpu",compute_type="int8",)
 
     segments, info = model.transcribe(
         audio,
         beam_size=10, 
-        best_of=5, 
+        best_of=5, # keep an eye on unepxpected keyword, if os we just take this out
         vad_filter=True,
         word_timestamps=True)
 
     print("Detected language:", info.language)
+    word: list[Word] = []
     for segment in segments:
         for w in segment.words:
             print(w.word, w.start, w.end, )
+            word.append(Word(w.word, w.start, w.end))
 
-def loadWavAsBytes(filename: str) -> bytes:
-    with wave.open(filename, "rb") as wf:
-        return wf.readframes(wf.getnframes())
+    return word
     
 def resampleAudio(audio: np.ndarray, srcRate: int) -> np.ndarray:
     if srcRate == 16000:
