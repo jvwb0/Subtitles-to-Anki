@@ -1,31 +1,30 @@
 import numpy as np
 import wave
 from Word_obj import Word
-from faster_whisper import WhisperModel
 
-# loopback recording settings
-DEVICE = 10
-RATE = 48000
-CHANNELS = 2
-CHUNK = 1024
-DURATION = 10
 
-MODEL_SIZE = "small" 
-#LANGUAGE = "pt" # Portuguese - we can change this as needed
-
-def bytesToNumpyArray(data: bytes) -> np.ndarray:
-    audio = np.frombuffer(data, dtype=np.int16)
-    audio = audio.reshape(-1, CHANNELS).mean(axis=1)  # stereo → mono
-    audio = audio.astype(np.float32) / 32768.0
+def prepareAudioFromWav(filename: str) -> np.ndarray:
+    data, srcRate, channels = loadWav(filename)
+    audio = bytesToNumpyArray(data, channels)
+    audio = resampleAudio(audio, srcRate)
     return audio
 
-def loadWavAsBytes(filename: str) -> bytes:
-    with wave.open(filename, "rb") as wf:
-        return wf.readframes(wf.getnframes())
-    
-def transcribeAudio(audio: np.ndarray) ->  list[Word]:
-    model = WhisperModel(MODEL_SIZE, device="cpu",compute_type="int8",)
+def bytesToNumpyArray(data: bytes, channels: int) -> np.ndarray:
+    audio = np.frombuffer(data, dtype=np.int16)
 
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)  # stereo → mono
+
+    return audio.astype(np.float32) / 32768.0
+     
+
+def loadWav(filename: str) -> tuple[bytes, int, int]:
+    with wave.open(filename, "rb") as wf:
+        data = wf.readframes(wf.getnframes())
+        return data, wf.getframerate(), wf.getnchannels()
+
+    
+def transcribeAudio(model, audio: np.ndarray) ->  list[Word]:
     segments, info = model.transcribe(
         audio,
         beam_size=10, 
@@ -34,13 +33,13 @@ def transcribeAudio(audio: np.ndarray) ->  list[Word]:
         word_timestamps=True)
 
     print("Detected language:", info.language)
-    word: list[Word] = []
+    
+    vocabulary: list[Word] = []
     for segment in segments:
         for w in segment.words:
-            print(w.word, w.start, w.end, )
-            word.append(Word(w.word, w.start, w.end))
+            vocabulary.append(Word(w.word, w.start, w.end))
 
-    return word
+    return vocabulary
     
 def resampleAudio(audio: np.ndarray, srcRate: int) -> np.ndarray:
     if srcRate == 16000:
@@ -51,9 +50,3 @@ def resampleAudio(audio: np.ndarray, srcRate: int) -> np.ndarray:
     xNew = np.linspace(0, len(audio) / srcRate, num=nNew, endpoint=False)
 
     return np.interp(xNew, xOld, audio).astype(np.float32)
-
-
-data = loadWavAsBytes("umalendachamadapinto.wav")
-audio = bytesToNumpyArray(data)
-audio = resampleAudio(audio, RATE)
-transcribeAudio(audio)
