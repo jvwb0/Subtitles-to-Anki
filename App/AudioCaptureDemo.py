@@ -69,7 +69,7 @@ def main():
     p.terminate()
 
     saveWav(frames)                         #save to file
-    readWavStream(filename)                 #read from file to check if we got what we wanted
+    #readWavStream(filename)                 #read from file to check if we got what we wanted
 # out put from demo was 4096 bytes per chunk,
 # each chunk is 1024 samples, each sample is 2 bytes (16 bit audio), stereo = 2 channels
 # 1024 samples * 2 bytes * 2 channels = 4096 bytes
