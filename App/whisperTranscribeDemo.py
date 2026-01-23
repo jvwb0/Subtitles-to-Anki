@@ -33,11 +33,14 @@ def transcribeAudio(model, audio: np.ndarray) ->  list[Word]:
         word_timestamps=True)
 
     print("Detected language:", info.language)
-    print(np.max(np.abs(audio))) # Debug: print max amplitude of audio
+
     vocabulary: list[Word] = []
+
     for segment in segments:
+        if not segment.words:
+            continue
         for w in segment.words:
-            vocabulary.append(Word(w.word, w.start, w.end))
+            vocabulary.append(Word(w.word.strip(), float(w.start), float(w.end)))
 
     return vocabulary
     
