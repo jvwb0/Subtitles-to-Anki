@@ -24,9 +24,14 @@ start = time.time()
 
 while time.time() - start < 10:
     controller.liveTick()  # record one chunk
-    time.sleep(0.01) 
 
 print("Stopping + transcribing...")
+
 words = controller.stopLiveAndTranscribe()
+
+if len(words) == 0:
+    print("No words detected. Likely wrong loopback device (no audio captured). Try device 16 vs 17.")
+    sys.exit(0)
+
 for w in words:
     print(f"{w.text} [{w.startTime:.2f} - {w.endTime:.2f}]")
