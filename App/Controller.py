@@ -5,10 +5,11 @@ from AudioCaptureLive import AudioCaptureLive
 
 class TranscriptionController:
     def __init__(self, modelSize="small", device=10):
+        self.device = device
         self.model = WhisperModel(modelSize, device="cpu", compute_type="int8")
 
-        self.fixedRecorder = AudioCaptureFixed(device=device)
-        self.liveRecorder = AudioCaptureLive(device=device)
+        self.fixedRecorder = AudioCaptureFixed(device=self.device)
+        self.liveRecorder = AudioCaptureLive(device=self.device)
 
         self.isRecording = False
 
@@ -30,8 +31,12 @@ class TranscriptionController:
         if self.isRecording:
             self.liveRecorder.readChunk()
 
-    def stopLiveAndTranscribe(self):
+    
+    def stopLive(self) -> str:
         self.isRecording = False
-        wav_path = self.liveRecorder.stop()
+        return self.liveRecorder.stop()
+
+    def stopLiveAndTranscribe(self):
+        wav_path = self.stopLive()
         return self.transcribeWav(wav_path)
 
