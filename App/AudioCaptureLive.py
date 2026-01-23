@@ -35,7 +35,7 @@ class AudioCaptureLive:
             )
 
     def readChunk(self):
-        self.frames.append(self.stream.read(self.chunk))
+        self.frames.append(self.stream.read(self.chunk, exception_on_overflow=False))
 
     def stop(self) -> str:
         self.stream.stop_stream()
