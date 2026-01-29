@@ -4,6 +4,8 @@ import pyaudiowpatch
 
 # (Loopback = record the speaker output as input)'
 # do not touch this file, it is working as intended
+
+#record a fixed duration and save WAV.
 class AudioCaptureFixed:
     def __init__(self, duration=20, rate=48000, channels=2, chunk=1024, device=10):
         self.duration = duration
