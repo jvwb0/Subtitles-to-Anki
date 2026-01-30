@@ -2,6 +2,7 @@ import numpy as np
 import wave
 from Word_obj import Word
 
+#audio prep + turning Whisper output into list[Word].
 
 def prepareAudioFromWav(filename: str) -> np.ndarray:
     data, srcRate, channels = loadWav(filename)
@@ -27,12 +28,13 @@ def loadWav(filename: str) -> tuple[bytes, int, int]:
 def transcribeAudio(model, audio: np.ndarray) ->  list[Word]:
     segments, info = model.transcribe(
         audio,
-        beam_size=10, 
-        best_of=5, # keep an eye on unepxpected keyword, if os we just take this out
-        vad_filter=False,
+        beam_size=2,        # small beam for decent accuracy
+        best_of=1,          # keep single pass for speed
+        vad_filter=True,    # skip silence = faster + better results
         word_timestamps=True)
 
-    print("Detected language:", info.language)
+    # Only print language once (suppress spam)
+    # print("Detected language:", info.language)
 
     vocabulary: list[Word] = []
 
