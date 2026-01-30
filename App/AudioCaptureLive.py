@@ -33,9 +33,13 @@ class AudioCaptureLive:
         )
 
     def readChunk(self) -> bytes:
-        data = self.stream.read(self.chunk, exception_on_overflow=False)
-        self.frames.append(data)
-        return data
+        try:
+            data = self.stream.read(self.chunk, exception_on_overflow=False)
+            self.frames.append(data)
+            return data
+        except Exception as e:
+            print(f"❌ Error reading chunk: {e}")
+            return b""
 
     def getRecentChunks(self, seconds: float) -> list[bytes]:
         # Returns raw PCM chunks (bytes) for the last N seconds.
