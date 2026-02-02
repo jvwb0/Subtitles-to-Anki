@@ -1,4 +1,5 @@
 # LiveTranscriber.py
+from tabnanny import check
 from utils.audio_utils import transcribeAudio
 from models.word import Word
 from services.audio_conversion import AudioConverter
@@ -53,9 +54,11 @@ class LiveTranscriber:
             # Skip if we've seen this exact word very recently (within 0.5s)
             if word_key in self.seen_words:
                 last_time = self.seen_words[word_key]
-                if w.endTime - last_time < 0.5:
+                if w.endTime - last_time < 0.9:
                     continue
-            
+            # Skip if it's the same as the last emitted word
+            if len(new_words) > 0 and w.text.lower() == new_words[-1].text.lower():
+                continue  
             # Also skip if it's before our cutoff
             if w.endTime <= self.lastEmittedEnd :
                 continue
