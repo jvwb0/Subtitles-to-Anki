@@ -30,10 +30,12 @@ def transcribeAudio(model, audio: np.ndarray, language: str = "en") ->  list[Wor
         audio,
         language=language,      # ✅ force language (prevents random flips)
         task="transcribe",      # ✅ do NOT translate; just transcribe in that language
-        beam_size=2,        # small beam for decent accuracy
-        best_of=1,          # keep single pass for speed
+        beam_size=5,        # small beam for decent accuracy
+        best_of=2,          # keep single pass for speed
         vad_filter=True,    # skip silence = faster + better results
         word_timestamps=True,
+        condition_on_previous_text=False,   # reduces repetition
+        no_speech_threshold=0.6,  # more aggressive speech detection
         )
     
     vocabulary: list[Word] = []
