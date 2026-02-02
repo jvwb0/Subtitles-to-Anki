@@ -1,0 +1,32 @@
+cd /path/to/Subtitles-to-Anki
+notepad .gitignore
+```
+
+Add these lines:
+```
+# Virtual environments
+.venv/
+venv/
+.venv311/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Audio outputs
+outputs/*.wav
+*.wav
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
