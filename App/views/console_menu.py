@@ -54,6 +54,8 @@ class ConsoleMenu:
         print("Choose mode:")
         print("  [1] Timed recording (specify duration)")
         print("  [2] Manual recording (press Enter to stop)")
+        print("  [3] Manual chunked recording (less repetition)")
+        
         
         mode = input("\nMode: ").strip()
         
@@ -63,8 +65,8 @@ class ConsoleMenu:
             
             self.controller.run_live_session(
                 duration_sec=duration,
-                window_sec=2.0,
-                tick_sleep=0.1,
+                window_sec=3.5,
+                tick_sleep=0.2,
                 save_wav=True,
                 on_words_callback=self._print_words
             )
@@ -73,8 +75,17 @@ class ConsoleMenu:
             print("\n🔴 Recording... (Press ENTER to stop)\n")
             
             self.controller.run_manual_session(
-                window_sec=2.0,
-                tick_sleep=0.1,
+                window_sec=3.0,
+                tick_sleep=0.15,
+                save_wav=True,
+                on_words_callback=self._print_words
+            )
+        
+        elif mode == "3":
+            print("\n🔴 Recording with manual chunking... (Press ENTER to stop)\n")
+            
+            self.controller.run_manual_session_chunked(
+                chunk_duration=3.0,
                 save_wav=True,
                 on_words_callback=self._print_words
             )
