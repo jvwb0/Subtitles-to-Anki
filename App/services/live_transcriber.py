@@ -18,7 +18,6 @@ Dedup strategy (layered, each one catches what the others miss):
 """
 
 import re
-from utils.audio_utils import transcribeAudio
 from models.word import Word
 from services.audio_conversion import AudioConverter
 
@@ -35,8 +34,12 @@ class LiveTranscriber:
     DEDUP_WINDOW_SEC = 3.0    # how far back in time we keep emitted-text history
     NGRAM_N          = 3      # how many trailing words to compare for sequence guard
 
-    def __init__(self, model, recorder, language: str = "en"):
-        self.model    = model
+    def __init__(self, whisper, recorder, language: str = "en"):
+        """
+        whisper   – WhisperService instance (owns the model + tuned params)
+        recorder  – AudioCaptureLive instance
+        """
+        self.whisper  = whisper
         self.recorder = recorder
         self.language = language
         self.reset()
@@ -62,7 +65,7 @@ class LiveTranscriber:
         if audio.size == 0:
             return []
 
-        words = transcribeAudio(self.model, audio, self.language)
+        words = self.whisper.transcribe(audio, self.language)
         if not words:
             return []
 
