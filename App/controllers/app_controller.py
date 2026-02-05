@@ -2,6 +2,7 @@
 import time
 import threading
 from services.whisper_service import WhisperService
+from services.vad_service import VadService
 from services.audio_capture_live import AudioCaptureLive
 from services.audio_conversion import AudioConverter
 from services.live_transcriber import LiveTranscriber
@@ -13,9 +14,10 @@ class AppController:
     def __init__(self, config):
         self.config = config
         self.whisper        = WhisperService(config.model_size, config.use_gpu)
+        self.vad            = VadService()
         self.live_recorder  = AudioCaptureLive(device=config.device_id)
         self.live_transcriber = LiveTranscriber(
-            self.whisper, self.live_recorder, config.language
+            self.whisper, self.live_recorder, self.vad, config.language
         )
         self.is_recording = False
         self._shutdown_requested = False
@@ -44,9 +46,22 @@ class AppController:
     # GUI background sessions (non-blocking)
     # ==================================================================
 
-    def start_live_background(self, window_sec=2.0, tick_sleep=0.5,
-                              on_words_callback=None):
-        """Rolling-window live transcription."""
+    def start_live_background(self, on_words_callback=None, **_kwargs):
+        """
+        VAD-gated live transcription — YouTube CC style.
+
+        Uses Silero VAD to detect speech/silence transitions in real-time.
+        Transcription is triggered at natural pause points (320ms silence) or
+        after 4 seconds of continuous speech.
+
+        Args:
+            on_words_callback: Callback function for new words
+
+        Result:
+            - Fast response to pauses (~350ms latency: pause + inference)
+            - High accuracy (Whisper sees complete speech segments)
+            - Low CPU (VAD processing: <1ms per frame, Whisper only on boundaries)
+        """
         if self.is_recording:
             return
         self.start_live("live.wav")
@@ -54,48 +69,27 @@ class AppController:
         def transcription_loop():
             while self.is_recording and not self._shutdown_requested:
                 try:
-                    new_words = self.live_transcriber.tick(window_sec)
+                    new_words = self.live_transcriber.tick()
                     if new_words and on_words_callback:
                         on_words_callback(new_words)
                 except Exception as e:
                     if not self._shutdown_requested:
                         print(f"❌ Transcription error: {e}")
-                time.sleep(tick_sleep)
+                time.sleep(0.05)  # 50ms tick for VAD processing
 
         self._audio_thread = threading.Thread(target=self._audio_capture_loop, daemon=True)
         self._trans_thread = threading.Thread(target=transcription_loop, daemon=True)
         self._audio_thread.start()
         self._trans_thread.start()
 
-    def start_overlapping_chunked_background(self, chunk_duration=3.0,
-                                             step_duration=1.5,
-                                             on_words_callback=None):
+    def start_overlapping_chunked_background(self, on_words_callback=None, **_kwargs):
         """
-        Overlapping chunked transcription.
-        Every step_duration seconds we transcribe the last chunk_duration seconds.
+        VAD-gated live transcription (same as start_live_background).
+
+        Legacy method name kept for API compatibility — both modes now use
+        the same VAD-based approach.
         """
-        if self.is_recording:
-            return
-        self.start_live("live.wav")
-
-        def transcription_loop():
-            last_t = time.time()
-            while self.is_recording and not self._shutdown_requested:
-                if time.time() - last_t >= step_duration:
-                    try:
-                        new_words = self.live_transcriber.tick(chunk_duration)
-                        if new_words and on_words_callback:
-                            on_words_callback(new_words)
-                    except Exception as e:
-                        if not self._shutdown_requested:
-                            print(f"❌ Transcription error: {e}")
-                    last_t = time.time()
-                time.sleep(0.1)
-
-        self._audio_thread = threading.Thread(target=self._audio_capture_loop, daemon=True)
-        self._trans_thread = threading.Thread(target=transcription_loop, daemon=True)
-        self._audio_thread.start()
-        self._trans_thread.start()
+        self.start_live_background(on_words_callback=on_words_callback)
 
     def stop_live_background(self, save_wav=True):
         """
