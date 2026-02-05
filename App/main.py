@@ -1,6 +1,5 @@
 import torch
-from views.console_menu import ConsoleMenu
-from views.gui_app import TranscriberGUI  # ← Add this
+from views.gui_app import TranscriberGUI
 
 
 def main():
@@ -8,19 +7,8 @@ def main():
     if torch.cuda.is_available():
         print(f"   CUDA Version: {torch.version.cuda}\n")
     
-    # Choose interface
-    print("Choose interface:")
-    print("  [1] Console (CLI)")
-    print("  [2] GUI")
-    
-    choice = input("Select: ").strip()
-    
-    if choice == "2":
-        app = TranscriberGUI()
-        app.run()
-    else:
-        menu = ConsoleMenu()
-        menu.run()
+    app = TranscriberGUI()
+    app.run()
 
 
 if __name__ == "__main__":
