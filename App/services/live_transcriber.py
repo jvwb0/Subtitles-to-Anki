@@ -1,169 +1,82 @@
+# services/live_transcriber_provisional.py
 """
-VAD-gated live transcription — YouTube-CC style.
+Live transcriber with provisional word support and revision tracking.
 
-Instead of blindly re-transcribing a sliding window every tick, we use
-Silero VAD to detect speech/silence transitions in real-time:
-
-  tick() runs every ~50 ms  (VAD processing: < 1 ms per frame)
-       │
-       ├─ New audio →  16 kHz mono  →  VAD frames (512 samples, 32 ms)
-       │
-       ├─ State machine
-       │      SILENCE ──(speech detected)──→  SPEECH
-       │      SPEECH  ──(≥320 ms silence)──→  segment_end   → transcribe
-       │      SPEECH  ──(≥4 s continuous)──→  max_speech    → forced flush
-       │
-       └─ Transcription triggered only on boundary events
-              • segment_end : segment is complete → Whisper sees clean boundary
-                              → high accuracy, emit all words
-              • max_speech  : segment ongoing    → hold back the last 400 ms
-                              (may still change) → emit only the stable prefix
-
-Dedup is minimal: segments don't overlap except for the forced-flush tail,
-which is handled by a single absolute-timestamp cutoff.
+Features:
+- Emits words immediately (may be provisional)
+- Re-transcribes overlapping audio
+- Detects revisions and confirms words
+- Sends update events for changed words
 """
 
-import re
-import numpy as np
-from models.word import Word
+from typing import List, Tuple, Optional
+from models.word import Word, WordState
 from services.audio_conversion import AudioConverter
+from utils.text_utils import strip_punct as _strip_punct
 
 
-def _strip_punct(text: str) -> str:
-    return re.sub(r'[^\w\s]', '', text.lower()).strip()
+class LiveTranscriber:  # KEPT SAME NAME
+    """Live transcriber with provisional word support."""
+    # ── tuning knobs ─────────────────────────────────────────────────
+    TIME_GRACE_SEC   = 0.10   # REDUCED: timestamp jitter tolerance (was 0.30)
+    DEDUP_WINDOW_SEC = 1.5    # REDUCED: text dedup window (was 4.0)
+    NGRAM_N          = 2      # REDUCED: n-gram overlap (was 4)
 
+    # Confidence thresholds
+    MIN_WORD_PROB    = 0.55
+    MIN_AVG_LOGPROB_CONFIRMED = Word.LOGPROB_THRESHOLD  # Above this → confirmed
+    MIN_AVG_LOGPROB_EMIT = -0.55       # Above this → emit as provisional
+    MAX_NO_SPEECH_PROB = 0.70  # INCREASED: allow more (was 0.65)
 
-class LiveTranscriber:
-    # ── VAD state-machine ────────────────────────────────────────
-    SPEECH_THRESHOLD = 0.5       # Silero prob ≥ this → speech
-    PAUSE_FRAMES     = 10        # × 32 ms = 320 ms silence → segment end
-    MIN_SEGMENT_SEC  = 0.15      # ignore segments shorter than this (clicks/noise)
-    MAX_SPEECH_SEC   = 4.0       # forced flush after this many seconds of speech
+    TIME_BUCKET_SEC = 0.30
+    MIN_WORD_LENGTH = 2
 
-    # ── audio windowing ──────────────────────────────────────────
-    CONTEXT_SEC      = 0.5       # prepended before each segment for Whisper context
-    OVERLAP_SEC      = 0.8       # forced-flush tail kept as next segment's context
-    FLUSH_CUTOFF_SEC = 0.4       # last N seconds of forced flush are "unstable" → held back
+    # Revision settings
+    REVISION_WINDOW_SEC = 2.5  # REDUCED: revision check window (was 3.0)
+    MIN_OVERLAP_RATIO = 0.6    # INCREASED: stricter overlap check (was 0.5)
+    
+    # Whitelist of valid short words
+    COMMON_SHORT_WORDS = frozenset({
+        'in', 'to', 'of', 'is', 'it', 'on', 'at', 'by', 'or', 'if',
+        'we', 'he', 'me', 'my', 'so', 'no', 'up', 'do', 'go', 'be',
+        'an', 'as', 'am', 'i', 'a'
+    })
 
-    # ── dedup ────────────────────────────────────────────────────
-    TIME_GRACE_SEC   = 0.15      # skip words ending ≤ lastEmitted + this
-
-    def __init__(self, whisper, recorder, vad, language: str = "en"):
+    def __init__(self, whisper, recorder, vad=None, language: str = "en",
+                 task: str = "transcribe"):
+        """
+        Args:
+            whisper: WhisperService instance
+            recorder: AudioCaptureLive instance
+            vad: VadService instance (optional, not used in streaming mode)
+            language: Language code for transcription
+            task: "transcribe" or "translate" (translate → English)
+        """
         self.whisper  = whisper
         self.recorder = recorder
-        self.vad      = vad
+        self.vad      = vad  # Kept for API compatibility, not used in streaming mode
         self.language = language
+        self.task     = task
         self.reset()
 
-    # ── lifecycle ────────────────────────────────────────────────
     def reset(self):
-        self.vad.reset()                          # LSTM state
+        self.lastEmittedEnd  = 0.0
+        self._displayed_words: List[Word] = []  # Track words currently displayed
+        self._tail: list[str] = []  # For n-gram dedup
 
-        self._in_speech        = False
-        self._speech_start_vad = 0.0              # VAD-clock seconds
-        self._last_speech_vad  = 0.0
-        self._vad_clock        = 0.0              # total seconds processed by VAD
-        self._vad_buf          = np.array([], dtype=np.float32)
-        self._chunk_cursor     = 0                # last recorder-frame index consumed
-
-        self._last_emitted_end = 0.0              # absolute time of last word we emitted
-
-    # ── public tick ──────────────────────────────────────────────
-    def tick(self) -> list[Word]:
+    # ── main tick ────────────────────────────────────────────────────
+    def tick(self, windowSec: float = 3.0) -> Tuple[List[Word], List[Tuple[Word, Word]]]:
         """
-        Call every ~50 ms.  Usually returns [].  On a speech boundary
-        it transcribes and returns new words.
+        Transcribe recent audio with provisional word support.
+        
+        Returns:
+            (new_words, revisions)
+            new_words: List of newly emitted words
+            revisions: List of (old_word, new_word) tuples for words that changed
         """
-        event = self._run_vad()
-        if event == "segment_end":
-            return self._do_transcribe(forced=False)
-        if event == "max_speech":
-            return self._do_transcribe(forced=True)
-        return []
-
-    # ── VAD processing ───────────────────────────────────────────
-    def _run_vad(self) -> str | None:
-        n = len(self.recorder.frames)
-        if n < self._chunk_cursor:          # buffer was trimmed
-            self._chunk_cursor = n
-        if n <= self._chunk_cursor:
-            return None
-
-        new_chunks        = self.recorder.frames[self._chunk_cursor:n]
-        self._chunk_cursor = n
-
-        audio = AudioConverter.chunks_to_float_mono_16k(
-            new_chunks,
-            srcRate=self.recorder.rate,
-            channels=self.recorder.channels,
-        )
-        if audio.size == 0:
-            return None
-
-        self._vad_buf = np.append(self._vad_buf, audio)
-
-        event     = None
-        frame_sec = self.vad.FRAME_SIZE / self.vad.SAMPLE_RATE   # 0.032
-
-        while len(self._vad_buf) >= self.vad.FRAME_SIZE and event is None:
-            frame            = self._vad_buf[:self.vad.FRAME_SIZE]
-            self._vad_buf    = self._vad_buf[self.vad.FRAME_SIZE:]
-            prob             = self.vad.speech_prob(frame)
-            event            = self._state_step(prob, frame_sec)
-            self._vad_clock += frame_sec
-
-        return event
-
-    def _state_step(self, prob: float, frame_sec: float) -> str | None:
-        """One frame through the speech state machine."""
-        t_after = self._vad_clock + frame_sec   # clock AFTER this frame
-
-        if prob >= self.SPEECH_THRESHOLD:
-            if not self._in_speech:
-                self._speech_start_vad = self._vad_clock
-                self._in_speech        = True
-            self._last_speech_vad = t_after
-
-            if (t_after - self._speech_start_vad) >= self.MAX_SPEECH_SEC:
-                return "max_speech"
-            return None
-
-        # — silence frame —
-        if not self._in_speech:
-            return None
-
-        pause = t_after - self._last_speech_vad
-        if pause >= self.PAUSE_FRAMES * frame_sec:
-            seg_dur = self._last_speech_vad - self._speech_start_vad
-            self._in_speech = False
-            if seg_dur < self.MIN_SEGMENT_SEC:
-                return None           # too short, ignore
-            return "segment_end"
-
-        return None
-
-    # ── transcription ────────────────────────────────────────────
-    def _abs_now(self) -> float:
-        return (len(self.recorder.frames) * self.recorder.chunk) / self.recorder.rate
-
-    def _do_transcribe(self, forced: bool) -> list[Word]:
-        abs_now = self._abs_now()
-
-        if forced:
-            grab_sec = self.MAX_SPEECH_SEC + self.CONTEXT_SEC + 0.2
-        else:
-            speech_dur  = self._last_speech_vad  - self._speech_start_vad
-            silence_dur = self._vad_clock        - self._last_speech_vad
-            grab_sec    = self.CONTEXT_SEC + speech_dur + silence_dur + 0.2
-
-        # Clamp to what's available
-        grab_sec = min(grab_sec, abs_now)
-        if grab_sec <= 0:
-            return []
-
-        chunks = self.recorder.getRecentChunks(grab_sec)
+        chunks = self.recorder.getRecentChunks(windowSec)
         if not chunks:
-            return []
+            return [], []
 
         audio = AudioConverter.chunks_to_float_mono_16k(
             chunks,
@@ -171,35 +84,193 @@ class LiveTranscriber:
             channels=self.recorder.channels,
         )
         if audio.size == 0:
-            return []
+            return [], []
 
-        words = self.whisper.transcribe(audio, self.language)
+        # ── 1. Transcribe ────────────────────────────────────────────
+        total_chunks = len(self.recorder.frames)
+        recorded_sec = (total_chunks * self.recorder.chunk) / self.recorder.rate
+        window_start = max(0.0, recorded_sec - windowSec)
+
+        words = self.whisper.transcribe(audio, self.language, task=self.task)
         if not words:
-            return []
+            return [], []
 
-        # — map word timestamps to absolute time —
-        audio_start = max(0.0, abs_now - grab_sec)
+        # Adjust to absolute timestamps
         for w in words:
-            w.startTime += audio_start
-            w.endTime   += audio_start
+            w.startTime += window_start
+            w.endTime += window_start
 
-        # — forced flush: hold back the unstable tail —
-        if forced:
-            safe_abs = abs_now - self.FLUSH_CUTOFF_SEC
-            words    = [w for w in words if w.endTime <= safe_abs]
-            # slide the segment window forward; next segment reuses the tail
-            self._speech_start_vad = self._vad_clock - self.OVERLAP_SEC
+        # ── 2. Strip n-gram prefix (old dedup) ──────────────────────
+        words = self._strip_ngram_prefix(words)
+        if not words:
+            return [], []
 
-        # — dedup & emit —
-        new_words = []
+        # ── 3. Check for revisions ───────────────────────────────────
+        revisions = []
+        truly_new_words = []
+        
         for w in words:
-            if not _strip_punct(w.text):
+            key = _strip_punct(w.text)
+            if not key:
                 continue
-            if w.endTime <= self._last_emitted_end + self.TIME_GRACE_SEC:
+            
+            # Filter fragments
+            if len(key) < self.MIN_WORD_LENGTH and key not in self.COMMON_SHORT_WORDS:
                 continue
-            new_words.append(w)
+            
+            # Skip silence
+            if w.no_speech_prob is not None and w.no_speech_prob >= self.MAX_NO_SPEECH_PROB:
+                continue
+            
+            # Check if this word overlaps with a provisional word
+            overlapping = self._find_overlapping_word(w)
+            
+            if overlapping and overlapping.is_provisional:
+                # Check if text changed
+                if _strip_punct(overlapping.text) != key:
+                    # Word was revised!
+                    w.mark_revised()
+                    revisions.append((overlapping, w))
+                    self._replace_displayed_word(overlapping, w)
+                else:
+                    # Same word, check if confidence improved
+                    if self._is_better_confidence(w, overlapping):
+                        # Confirm the word
+                        overlapping.confirm()
+                        # Update confidence scores
+                        overlapping.avg_logprob = w.avg_logprob
+                        overlapping.confidence = w.confidence
+            else:
+                # Check if this is truly new (not already displayed)
+                if not self._is_already_displayed(w):
+                    truly_new_words.append(w)
+        
+        # ── 4. Filter truly new words (minimal dedup for streaming) ──
+        filtered_new = []
+        for w in truly_new_words:
+            # REMOVED aggressive time cutoff - rely on text-based dedup instead
+            # In streaming mode, timestamps can overlap between ticks
 
-        if new_words:
-            self._last_emitted_end = new_words[-1].endTime
+            # Text-proximity dedup (same word text recently?)
+            key = _strip_punct(w.text)
+            if self._seen_recently(key, w.startTime):
+                continue
 
-        return new_words
+            filtered_new.append(w)
+        
+        # ── 5. Update tracking ───────────────────────────────────────
+        if filtered_new:
+            self.lastEmittedEnd = filtered_new[-1].endTime
+            
+            # Add to displayed words
+            self._displayed_words.extend(filtered_new)
+            
+            # Update tail for n-gram
+            for w in filtered_new:
+                key = _strip_punct(w.text)
+                self._tail.append(key)
+                if len(self._tail) > self.NGRAM_N:
+                    self._tail = self._tail[-self.NGRAM_N:]
+        
+        # Prune old displayed words (keep last REVISION_WINDOW_SEC)
+        cutoff_time = recorded_sec - self.REVISION_WINDOW_SEC
+        self._displayed_words = [
+            w for w in self._displayed_words 
+            if w.endTime > cutoff_time
+        ]
+        
+        # Phrasal verb detection removed - will implement API-based approach later
+        # (checking dictionary on hover, not hardcoding phrases)
+        
+        return filtered_new, revisions
+
+    # ── helpers ──────────────────────────────────────────────────────
+    def _find_overlapping_word(self, word: Word) -> Optional[Word]:
+        """
+        Find a displayed word that overlaps temporally with this word.
+        
+        Returns the provisional word if found, None otherwise.
+        """
+        for displayed in self._displayed_words:
+            # Check temporal overlap
+            overlap_start = max(word.startTime, displayed.startTime)
+            overlap_end = min(word.endTime, displayed.endTime)
+            overlap_duration = max(0, overlap_end - overlap_start)
+            
+            # Calculate overlap ratio
+            word_duration = word.endTime - word.startTime
+            displayed_duration = displayed.endTime - displayed.startTime
+            
+            if word_duration <= 0 or displayed_duration <= 0:
+                continue
+            
+            overlap_ratio = overlap_duration / min(word_duration, displayed_duration)
+            
+            # If significant overlap (>50%), consider it the same word position
+            if overlap_ratio >= self.MIN_OVERLAP_RATIO:
+                return displayed
+        
+        return None
+    
+    def _is_already_displayed(self, word: Word) -> bool:
+        """Check if word is already in displayed list."""
+        key = _strip_punct(word.text)
+
+        for displayed in self._displayed_words:
+            # Check if same text at similar time
+            if _strip_punct(displayed.text) == key:
+                time_diff = abs(word.startTime - displayed.startTime)
+                if time_diff < 0.25:  # REDUCED: Within 250ms (was 500ms)
+                    return True
+
+        return False
+    
+    def _replace_displayed_word(self, old: Word, new: Word):
+        """Replace old word with new word in displayed list."""
+        try:
+            idx = self._displayed_words.index(old)
+            self._displayed_words[idx] = new
+        except ValueError:
+            # Old word not in list (shouldn't happen, but handle gracefully)
+            pass
+    
+    def _is_better_confidence(self, new_word: Word, old_word: Word) -> bool:
+        """Check if new word has better confidence than old."""
+        # Compare avg_logprob
+        new_alp = new_word.avg_logprob if new_word.avg_logprob is not None else -999
+        old_alp = old_word.avg_logprob if old_word.avg_logprob is not None else -999
+        
+        if new_alp > old_alp + 0.1:  # Significantly better
+            return True
+        
+        # Compare word confidence
+        new_conf = new_word.confidence if new_word.confidence is not None else 0
+        old_conf = old_word.confidence if old_word.confidence is not None else 0
+        
+        if new_conf > old_conf + 0.1:
+            return True
+        
+        return False
+    
+    def _seen_recently(self, key: str, word_start: float) -> bool:
+        """Check if word was seen recently in displayed words."""
+        for displayed in self._displayed_words:
+            if _strip_punct(displayed.text) == key:
+                # Check if word is at similar time position (not just same text)
+                time_diff = abs(word_start - displayed.startTime)
+                if time_diff < 0.4:  # Same word at ~same position
+                    return True
+        return False
+
+    def _strip_ngram_prefix(self, words: list[Word]) -> list[Word]:
+        """Remove stale prefix that matches tail."""
+        if not self._tail or not words:
+            return words
+
+        n = min(self.NGRAM_N, len(self._tail), len(words))
+        tail_slice  = self._tail[-n:]
+        words_slice = [_strip_punct(w.text) for w in words[:n]]
+
+        if tail_slice == words_slice:
+            return words[n:]
+        return words

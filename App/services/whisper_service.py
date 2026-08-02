@@ -13,7 +13,7 @@ class WhisperService:
                 import torch
                 if torch.cuda.is_available():
                     device = "cuda"
-                    compute_type = "float32"
+                    compute_type = "float16"
                 else:
                     device = "cpu"
                     compute_type = "int8"
@@ -22,7 +22,7 @@ class WhisperService:
                 compute_type = "int8"
         elif use_gpu:
             device = "cuda"
-            compute_type = "float32"
+            compute_type = "float16"
         else:
             device = "cpu"
             compute_type = "int8"
@@ -31,11 +31,11 @@ class WhisperService:
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
         print("✓ Model loaded!")
 
-    def transcribe(self, audio, language="en") -> list[Word]:
+    def transcribe(self, audio, language="en", task="transcribe") -> list[Word]:
         segments, _info = self.model.transcribe(
             audio,
             language=language,
-            task="transcribe",
+            task=task,
             beam_size=5,
             best_of=2,
             vad_filter=True,
