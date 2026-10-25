@@ -160,5 +160,65 @@ class VadPartialTests(unittest.TestCase):
         self.assertGreaterEqual(finals, 15, "segments must keep being detected after the cap")
 
 
+class PunctuatedWhisper:
+    """Half-second words from the start of the clip; every third word ends a sentence."""
+
+    def transcribe(self, audio, language="en", task="transcribe", prompt=None):
+        dur = len(audio) / RATE
+        return [Word(f"w{i}." if i % 3 == 2 else f"w{i}", i * 0.5, i * 0.5 + 0.5)
+                for i in range(int(dur / 0.5))]
+
+
+class ContinuousSpeechTests(unittest.TestCase):
+    def feed(self, tr, rec, vad, frames_speaking):
+        vad.script = [True] * frames_speaking
+        vad.i = 0
+        out = []
+        for _ in vad.script:
+            rec.append_chunk(chunk_bytes())
+            out.append(tr.tick())
+        return out
+
+    def test_unbroken_speech_is_cut_at_a_sentence_boundary_not_a_fixed_length(self):
+        rec, vad = make_recorder(), FakeVad()
+        tr = VadTranscriber(PunctuatedWhisper(), rec, vad)
+        results = self.feed(tr, rec, vad, int(8.3 / FRAME_SEC))
+        finals = [f for f, _ in results if f]
+
+        self.assertEqual(len(finals), 1)
+        self.assertTrue(finals[0][-1].text.endswith("."), "cut must land after sentence punctuation")
+        self.assertEqual(tr.cut_counts["forced_split"], 1)
+        self.assertEqual(tr.cut_counts["forced_fallback"], 0)
+
+    def test_speech_shorter_than_the_cap_is_not_cut(self):
+        rec, vad = make_recorder(), FakeVad()
+        tr = VadTranscriber(PunctuatedWhisper(), rec, vad)
+        results = self.feed(tr, rec, vad, int(6.0 / FRAME_SEC))
+        self.assertFalse([f for f, _ in results if f])
+
+    def test_long_segment_ends_on_a_shorter_pause(self):
+        rec, vad = make_recorder(), FakeVad()
+        tr = VadTranscriber(PunctuatedWhisper(), rec, vad)
+        speech = int(5.0 / FRAME_SEC)
+        short_pause = 6  # 192 ms: too short for a normal segment, enough after LONG_SEGMENT_SEC
+        vad.script = [True] * speech + [False] * short_pause
+        results = []
+        for _ in vad.script:
+            rec.append_chunk(chunk_bytes())
+            results.append(tr.tick())
+        self.assertTrue([f for f, _ in results if f])
+        self.assertEqual(tr.cut_counts["pause"], 1)
+
+    def test_short_segment_needs_the_full_pause(self):
+        rec, vad = make_recorder(), FakeVad()
+        tr = VadTranscriber(PunctuatedWhisper(), rec, vad)
+        vad.script = [True] * int(2.0 / FRAME_SEC) + [False] * 6
+        results = []
+        for _ in vad.script:
+            rec.append_chunk(chunk_bytes())
+            results.append(tr.tick())
+        self.assertFalse([f for f, _ in results if f])
+
+
 if __name__ == "__main__":
     unittest.main()

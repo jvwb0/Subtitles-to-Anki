@@ -65,7 +65,7 @@ flowchart LR
     B --> C[AudioConverter<br/>mono float32 16 kHz]
     C --> D[Silero VAD ONNX<br/>32 ms frames]
     D -->|speech window| E[Whisper partials every 0.6 s]
-    D -->|pause or 4 s max| F[Whisper final]
+    D -->|pause or 8 s safety cut at best boundary| F[Whisper final]
     E --> G[Word list<br/>absolute timestamps]
     F --> G
     G --> H[Dedup / revision logic]
@@ -169,7 +169,8 @@ Whisper models offered (VRAM / RAM figures are the app's own estimates, not meas
 | `logs/faulthandler.log` | Native crash stacks | Only written on a hard crash |
 | `~/.cache/silero_vad/silero_vad.onnx` | Silero VAD weights | Downloaded on first run |
 | Hugging Face cache | faster-whisper model files | Downloaded on first model load of each size |
-| `live.wav` | Optional recording of the last 5 minutes | Written only when "Save recording to WAV" is on and Stop is pressed |
+| `recordings/NNNN_date_model_lang_gpu.wav` + `.txt` | Auto-numbered session recording (`services/recording_store.py`) and full transcript sidecar; folder is git-ignored | Written on Stop when "Save recording to WAV" is on; WAV holds only the last 5 min, the sidecar covers the whole session |
+| `live.wav` (legacy) | Old fixed-name recording of the last 5 minutes | Written only when "Save recording to WAV" is on and Stop is pressed |
 
 SQLite schema:
 ```sql
@@ -206,7 +207,8 @@ No API keys or secrets are used anywhere.
 | `SPEECH_THRESHOLD` | 0.5 | `vad_transcriber.py` | Probability counted as speech |
 | `PAUSE_FRAMES` | 10 (about 320 ms) | `vad_transcriber.py` | Silence that ends a segment |
 | `MIN_SEGMENT_SEC` | 0.15 | `vad_transcriber.py` | Shorter segments ignored |
-| `MAX_SPEECH_SEC` | 4.0 | `vad_transcriber.py` | Forces a transcription mid-speech |
+| `MAX_SPEECH_SEC` | 8.0 | `vad_transcriber.py` | Safety cut; `SegmentSplitter` picks the biggest gap / punctuation boundary so the rest stays open (counts in `cut_counts`) |
+| `LONG_SEGMENT_SEC` / `PAUSE_FRAMES_LONG` | 4.0 / 5 | `vad_transcriber.py` | After 4 s of speech a 160 ms pause ends the segment (else 320 ms) |
 | `CONTEXT_SEC` / `OVERLAP_SEC` / `FLUSH_CUTOFF_SEC` | 0.5 / 0.8 / 0.4 | `vad_transcriber.py` | Audio context and forced-flush handling |
 | Transcription tick | 0.05 s; partial inference every 0.6 s during speech | `transcription_controller.py`, `vad_transcriber.py` | Single speech-gated pipeline |
 | `CaptionBuilder.MAX_CHARS_PER_LINE` / `MAX_LINES` | 42 / 2 | `caption_builder.py` | Caption size bound |

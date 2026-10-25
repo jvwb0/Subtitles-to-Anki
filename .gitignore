@@ -28,3 +28,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Session recordings (wav + transcript)
+recordings/

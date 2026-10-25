@@ -4,6 +4,7 @@
 import time
 import threading
 
+from services.recording_store import RecordingStore
 from utils.app_logger import get_logger
 
 logger = get_logger(__name__)
@@ -23,9 +24,8 @@ class TranscriptionController:
         self._shutdown_requested = False
         self._transcription_loaded = False
         self._translate = False
-
-    # ==================================================================
-    # Lifecycle (load / unload)
+        self._recordings = RecordingStore()
+        self._session_lines: list[str] = []
     # ==================================================================
 
     def load(self, config):
@@ -116,7 +116,9 @@ class TranscriptionController:
             return
 
         self._active_transcriber = self.vad_transcriber
-        self._start_recorder("live.wav")
+        wav_path = self._recordings.new_session_path(self.config)
+        self._session_lines = [f"# {self.config}"]
+        self._start_recorder(wav_path)
 
         def transcription_loop():
             while self.is_recording and not self._shutdown_requested:
@@ -124,8 +126,10 @@ class TranscriptionController:
                     new_words, partial = self._active_transcriber.tick()
                     if partial is not None and on_partial_callback:
                         on_partial_callback(partial)
-                    if new_words and on_words_callback:
-                        on_words_callback(new_words)
+                    if new_words:
+                        self._log_final_words(new_words)
+                        if on_words_callback:
+                            on_words_callback(new_words)
                 except Exception:
                     if not self._shutdown_requested:
                         logger.exception("Transcription error")
@@ -135,6 +139,20 @@ class TranscriptionController:
         self._trans_thread = threading.Thread(target=transcription_loop, daemon=True)
         self._audio_thread.start()
         self._trans_thread.start()
+
+    def _log_final_words(self, words):
+        text = " ".join(w.text for w in words)
+        self._session_lines.append(f"[{words[0].startTime:7.2f} - {words[-1].endTime:7.2f}] {text}")
+
+    def _save_session_transcript(self, wav_path):
+        """Write the final transcript next to the WAV (times are session seconds, not WAV seconds)."""
+        recorder = self.live_recorder
+        buffered_sec = len(recorder.frames) * recorder.chunk / recorder.rate
+        wav_starts_at = max(0.0, recorder.elapsed_sec - buffered_sec)
+        header, *lines = self._session_lines
+        self._recordings.write_transcript(
+            wav_path, [header, f"# wav starts at session time {wav_starts_at:.2f}s", *lines]
+        )
 
     def stop_background(self, save_wav=True):
         """Stop background transcription with robust cleanup."""
@@ -171,6 +189,7 @@ class TranscriptionController:
             result = self.live_recorder.cleanup_and_save(save_wav=save_wav)
             if result:
                 logger.info("WAV saved: %s", result)
+                self._save_session_transcript(result)
             logger.info("Stop complete")
             return result
         except Exception:

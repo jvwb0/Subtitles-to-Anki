@@ -4,7 +4,7 @@ caption latency (how long after a word was spoken it is emitted).
 
 Usage (from repo root):
     python tools\replay_wav.py path\to\file.wav [--model small] [--cpu] [--lang en] [--max-sec 60]
-        [--no-stabilize] [--no-prompt]
+        [--no-stabilize] [--no-prompt] [--max-speech SEC]
 """
 
 import argparse
@@ -45,6 +45,19 @@ def percentile(values, pct):
     return values[min(len(values) - 1, int(len(values) * pct / 100))]
 
 
+def segment_texts(finals):
+    """Final words grouped by the tick that emitted them."""
+    batch, last_wall = [], None
+    for wall, w in finals:
+        if last_wall is not None and abs(wall - last_wall) > 1e-6:
+            yield " ".join(batch)
+            batch = []
+        batch.append(w.text)
+        last_wall = wall
+    if batch:
+        yield " ".join(batch)
+
+
 def flicker_per_100(partials, final_walls):
     """Words already on screen (all but the newest) that a later update rewrote."""
     def key(w):
@@ -74,7 +87,10 @@ def main():
     parser.add_argument("--max-sec", type=float, default=0)
     parser.add_argument("--no-stabilize", action="store_true", help="show raw partial hypotheses")
     parser.add_argument("--no-prompt", action="store_true", help="don't feed previous text to Whisper")
+    parser.add_argument("--max-speech", type=float, help="override VadTranscriber.MAX_SPEECH_SEC")
     args = parser.parse_args()
+    if args.max_speech:
+        VadTranscriber.MAX_SPEECH_SEC = args.max_speech
 
     with wave.open(args.wav, "rb") as wf:
         rate, channels = wf.getframerate(), wf.getnchannels()
@@ -134,6 +150,11 @@ def main():
 
     print(f"  flicker: {flicker_per_100(partials, [wall for wall, _ in finals]):.1f} "
           "reworded words per 100 shown")
+
+    print(f"  segment ends: {dict(transcriber.cut_counts)}")
+    texts = [t for t in segment_texts(finals)]
+    ends_clean = sum(t.rstrip("\"')").endswith((".", "?", "!", ",", "?")) for t in texts)
+    print(f"  segments ending on punctuation: {ends_clean}/{len(texts)}")
 
     print("\nfinal text by emission:")
     batch, last_wall = [], None

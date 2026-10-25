@@ -13,9 +13,11 @@ closely. The final transcription at the pause replaces the partial text.
 """
 
 import numpy as np
+from collections import Counter
 from models.word import Word, shift_timestamps
 from services.audio_conversion import AudioConverter
 from services.partial_stabilizer import PartialStabilizer
+from services.segment_splitter import SegmentSplitter
 from utils.text_utils import strip_punct as _strip_punct
 
 
@@ -23,13 +25,15 @@ class VadTranscriber:
     # VAD state machine settings
     SPEECH_THRESHOLD = 0.5       # Silero prob >= this = speech
     PAUSE_FRAMES     = 10        # 10 × 32ms = 320ms silence = segment end
+    LONG_SEGMENT_SEC = 4.0       # after this much speech, a shorter pause already ends it
+    PAUSE_FRAMES_LONG = 5        # 5 × 32ms = 160ms
     MIN_SEGMENT_SEC  = 0.15      # Ignore segments shorter than this
-    MAX_SPEECH_SEC   = 4.0       # Force flush after 4s continuous speech
+    MAX_SPEECH_SEC   = 8.0       # Safety cut only: speech that never pauses is split at its best boundary
 
     # Audio windowing
     CONTEXT_SEC      = 0.5       # Context before segment for Whisper
-    OVERLAP_SEC      = 0.8       # Tail kept for next segment on forced flush
-    FLUSH_CUTOFF_SEC = 0.4       # Hold back last N seconds on forced flush
+    OVERLAP_SEC      = 0.8       # Tail kept for next segment when no boundary was found
+    FLUSH_CUTOFF_SEC = 0.4       # Hold back last N seconds on a safety cut
 
     # Live partial text while speech is ongoing
     PARTIAL_INTERVAL_SEC = 0.6   # re-transcribe the open segment this often
@@ -67,6 +71,7 @@ class VadTranscriber:
 
         self._last_emitted_end = 0.0
         self._context_text     = ""
+        self.cut_counts        = Counter()  # why segments ended: pause / forced_split / forced_fallback
         self._stabilizer.reset()
 
     def tick(self):
@@ -136,8 +141,9 @@ class VadTranscriber:
             return None
 
         pause = t_after - self._last_speech_vad
-        if pause >= self.PAUSE_FRAMES * frame_sec:
-            seg_dur = self._last_speech_vad - self._speech_start_vad
+        seg_dur = self._last_speech_vad - self._speech_start_vad
+        pause_frames = self.PAUSE_FRAMES_LONG if seg_dur >= self.LONG_SEGMENT_SEC else self.PAUSE_FRAMES
+        if pause >= pause_frames * frame_sec:
             self._in_speech = False
             if seg_dur < self.MIN_SEGMENT_SEC:
                 return None
@@ -188,32 +194,38 @@ class VadTranscriber:
         return self._stabilizer.update(words) if self.stabilize_partials else words
 
     def _do_transcribe(self, forced: bool):
-        abs_now = self.recorder.elapsed_sec
-        backlog = self._backlog_sec()
-
-        if forced:
-            grab_sec = self.MAX_SPEECH_SEC + self.CONTEXT_SEC + 0.2 + backlog
-        else:
-            speech_dur = self._last_speech_vad - self._speech_start_vad
-            silence_dur = self._vad_clock - self._last_speech_vad
-            grab_sec = self.CONTEXT_SEC + speech_dur + silence_dur + 0.2 + backlog
-
-        words = self._transcribe_window(grab_sec)
+        window_sec = self.CONTEXT_SEC + (self._vad_clock - self._speech_start_vad) + 0.2
+        words = self._transcribe_window(window_sec + self._backlog_sec())
         self._last_partial_vad = self._vad_clock
 
-        # Forced flush: hold back unstable tail
-        if forced:
-            safe_abs = abs_now - self.FLUSH_CUTOFF_SEC
-            words = [w for w in words if w.endTime <= safe_abs]
-            self._speech_start_vad = self._vad_clock - self.OVERLAP_SEC
-
         new_words = self._unseen(words)
+        if forced:
+            new_words = self._finalize_up_to_best_boundary(new_words)
+        else:
+            self.cut_counts["pause"] += 1
+
         self._stabilizer.reset()
         if new_words:
             self._last_emitted_end = new_words[-1].endTime
             self._remember_context(new_words)
 
         return new_words
+
+    def _finalize_up_to_best_boundary(self, words: list) -> list:
+        """Speech never paused: finalize up to the most natural cut and keep the rest open."""
+        stable_end = self.recorder.elapsed_sec - self.FLUSH_CUTOFF_SEC
+        count = SegmentSplitter.split_index(words, stable_end)
+
+        if count is None:
+            self.cut_counts["forced_fallback"] += 1
+            self._speech_start_vad = self._vad_clock - self.OVERLAP_SEC
+            return [w for w in words if w.endTime <= stable_end]
+
+        self.cut_counts["forced_split"] += 1
+        final, rest = words[:count], words[count:]
+        resume = rest[0].startTime - 0.1 if rest else final[-1].endTime
+        self._speech_start_vad = min(max(resume, self._speech_start_vad), self._vad_clock - 0.5)
+        return final
 
     def _remember_context(self, words: list):
         text = f"{self._context_text} {' '.join(w.text for w in words)}".strip()
