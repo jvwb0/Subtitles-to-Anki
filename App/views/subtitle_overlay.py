@@ -351,6 +351,11 @@ class SubtitleOverlay(QWidget):
         self._lines_layout = QVBoxLayout(self._flow_container)
         self._lines_layout.setContentsMargins(0, 0, 0, 0)
         self._lines_layout.setSpacing(2)
+        self._stable_width = min(
+            int(QApplication.primaryScreen().geometry().width() * 0.8),
+            760,
+        )
+        self._flow_container.setFixedWidth(self._stable_width - 2 * self.MARGIN_X)
 
         self._translation_label = QLabel(self._background)
         self._translation_label.setStyleSheet(
@@ -425,7 +430,7 @@ class SubtitleOverlay(QWidget):
             return
 
         screen = QApplication.primaryScreen().geometry()
-        max_line_width = int(screen.width() * 0.8) - 2 * self.MARGIN_X
+        max_line_width = self._stable_width - 2 * self.MARGIN_X
         metrics = QFontMetrics(WORD_FONT)
         word_pad = 12  # matches WordLabel's 6px horizontal padding on each side
 
@@ -446,7 +451,6 @@ class SubtitleOverlay(QWidget):
         for line_words in lines:
             row = QHBoxLayout()
             row.setSpacing(4)
-            row.addStretch(1)
             for word_obj in line_words:
                 lbl = WordLabel(word_obj)
                 lbl.hovered.connect(self._on_word_hover)
@@ -458,10 +462,11 @@ class SubtitleOverlay(QWidget):
 
     def _reposition(self):
         screen = QApplication.primaryScreen().geometry()
-        max_width = int(screen.width() * 0.8)
-        self._translation_label.setMaximumWidth(max_width - 2 * self.MARGIN_X)
+        self._stable_width = min(int(screen.width() * 0.8), 760)
+        self._flow_container.setFixedWidth(self._stable_width - 2 * self.MARGIN_X)
+        self._translation_label.setMaximumWidth(self._stable_width - 2 * self.MARGIN_X)
 
-        self.setMaximumWidth(max_width)
+        self.setFixedWidth(self._stable_width)
         self.adjustSize()
         x = screen.x() + (screen.width() - self.width()) // 2
         y = screen.y() + 60  # fixed distance from the top of the screen

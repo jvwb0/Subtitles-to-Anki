@@ -4,10 +4,14 @@ Async sentence-level translation using deep-translator (GoogleTranslator).
 Debounces rapid calls so Google Translate is not spammed on every word.
 """
 
+import sqlite3
 import threading
 from deep_translator import GoogleTranslator
 
 from interfaces.translation_provider import ITranslationProvider
+from utils.app_logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class TranslationService(ITranslationProvider):
@@ -59,7 +63,11 @@ class TranslationService(ITranslationProvider):
                 return
 
         from services.cache_service import CacheService
-        cached = CacheService.get().get_translation(text, src, "en")
+        try:
+            cached = CacheService.get().get_translation(text, src, "en")
+        except sqlite3.Error:
+            logger.exception("Could not read the subtitle translation cache")
+            cached = None
         if cached:
             with self._lock:
                 self._last_translated_text = text.strip()
@@ -69,14 +77,24 @@ class TranslationService(ITranslationProvider):
 
         try:
             result = GoogleTranslator(source=src, target="en").translate(text)
-            if result:
-                with self._lock:
-                    self._last_translated_text = text.strip()
-                    self._last_translation = result
-                CacheService.get().save_translation(text, src, "en", result)
-                callback(result)
-        except Exception as e:
-            print(f"Translation error: {e}")
+        except Exception:
+            logger.exception("Subtitle translation failed")
+            callback("Translation unavailable")
+            return
+
+        if not result:
+            logger.warning("Subtitle translation returned no text")
+            callback("Translation unavailable")
+            return
+
+        with self._lock:
+            self._last_translated_text = text.strip()
+            self._last_translation = result
+        try:
+            CacheService.get().save_translation(text, src, "en", result)
+        except sqlite3.Error:
+            logger.exception("Could not cache subtitle translation")
+        callback(result)
 
     def clear(self):
         """Reset state (e.g. when feature is toggled off)."""

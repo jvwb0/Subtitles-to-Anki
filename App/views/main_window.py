@@ -46,7 +46,8 @@ class MainWindow(QMainWindow):
         self._shown_texts: list[str] = []
         self._caption_timer = QTimer(self)
         self._caption_timer.timeout.connect(self._refresh_overlay)
-        self._transcript_chars = 0
+        self._transcript_committed = ""
+        self._transcript_partial = ""
 
         self._words_ready.connect(self._on_words_main_thread)
         self._partial_ready.connect(self._on_partial_main_thread)
@@ -133,13 +134,17 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.save_wav_check, 3, 2, 1, 2)
 
         # -- translate --
-        self.translate_check = QCheckBox("Translate → EN")
-        self.translate_check.setToolTip("Translate foreign speech to English subtitles\n(uses Whisper's built-in translation)")
+        self.translate_check = QCheckBox("English only (replace original)")
+        self.translate_check.setToolTip(
+            "Use Whisper to transcribe speech directly into English instead of showing the original language."
+        )
         self.translate_check.toggled.connect(self._on_translate_toggle)
         grid.addWidget(self.translate_check, 4, 1, 1, 2)
 
-        self.dual_sub_check = QCheckBox("Show Translation (EN)")
-        self.dual_sub_check.setToolTip("Show English translation below the original subtitles\n(uses Google Translate — requires internet)")
+        self.dual_sub_check = QCheckBox("Dual captions: add English")
+        self.dual_sub_check.setToolTip(
+            "Keep the original-language captions and add an English translation below them. Requires internet."
+        )
         self.dual_sub_check.toggled.connect(self._on_dual_subtitle_toggle)
         grid.addWidget(self.dual_sub_check, 5, 1, 1, 2)
 
@@ -353,6 +358,8 @@ class MainWindow(QMainWindow):
             logger.exception("Failed to show partial words")
 
     def _set_partial_words(self, words):
+        self._transcript_partial = " ".join(w.text for w in words if w.text.strip())
+        self._refresh_transcript()
         self._captions.set_partial(words)
         self._refresh_overlay()
 
@@ -377,14 +384,17 @@ class MainWindow(QMainWindow):
         if not new_words:
             return
 
+        self._transcript_committed += " " + " ".join(w.text for w in new_words)
+        self._transcript_partial = ""
+        self._refresh_transcript()
         restarted = self._captions.add_final(new_words)
         self._refresh_overlay()
-        self._append_transcript(" ".join(w.text for w in new_words))
 
         if restarted:
             self.overlay.push_translation("")
         if self.controller.is_dual_subtitle_enabled:
             caption = self._captions.committed_text()
+            self.overlay.push_translation("Translating…")
             self.controller.translate_subtitle(
                 caption, self._get_transcription_lang(),
                 callback=lambda translated: self._show_translation(caption, translated),
@@ -392,27 +402,17 @@ class MainWindow(QMainWindow):
 
     def _show_translation(self, caption: str, translated: str):
         """BG thread: drop translations that arrive after the caption moved on."""
-        if caption == self._captions.committed_text():
+        if (caption == self._captions.committed_text()
+                and self._captions.shows_committed_caption):
             self.overlay.push_translation(translated)
 
-    def _append_transcript(self, text: str):
-        chunk = text + " "
+    def _refresh_transcript(self):
+        text = (self._transcript_committed + " " + self._transcript_partial).strip()
+        self.transcript.setPlainText(text[-MAX_TRANSCRIPT_CHARS:])
         cursor = self.transcript.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(chunk)
-        self._transcript_chars += len(chunk)
-        self._trim_transcript()
+        self.transcript.setTextCursor(cursor)
         self.transcript.ensureCursorVisible()
-
-    def _trim_transcript(self):
-        overflow = self._transcript_chars - MAX_TRANSCRIPT_CHARS
-        if overflow <= 0:
-            return
-        cursor = self.transcript.textCursor()
-        cursor.movePosition(cursor.MoveOperation.Start)
-        cursor.movePosition(cursor.MoveOperation.Right, cursor.MoveMode.KeepAnchor, overflow)
-        cursor.removeSelectedText()
-        self._transcript_chars -= overflow
 
     # ==================================================================
     # Misc
@@ -420,7 +420,8 @@ class MainWindow(QMainWindow):
 
     def _clear(self):
         self.transcript.clear()
-        self._transcript_chars = 0
+        self._transcript_committed = ""
+        self._transcript_partial = ""
         self._captions.clear()
         self._shown_texts = []
         self.overlay.clear()

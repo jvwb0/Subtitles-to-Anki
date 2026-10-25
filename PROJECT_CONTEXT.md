@@ -50,7 +50,7 @@ The owner is a learner building this for personal use, with a plan to publish it
 | ctranslate2 | Inference engine under faster-whisper; owns GPU/CUDA use |
 | Silero VAD | Tiny (~2 MB) voice-activity-detection model; says whether a 32 ms audio frame contains speech |
 | Live pipeline | Single mode: Whisper runs on speech only, with live partial text every 0.6 s and a final at each pause |
-| Provisional / confirmed word | Confidence state of a word in the sliding-window modes (see `Word`) |
+| Partial / final hypothesis | Live changing speech guess / finalized words at a pause or forced flush |
 | Overlay | The borderless always-on-top subtitle bar |
 | Hover card / detail dialog | Small definition popup / full word-detail window |
 | AnkiConnect | Anki add-on exposing an HTTP API on `localhost:8765` |
@@ -63,11 +63,11 @@ The owner is a learner building this for personal use, with a plan to publish it
 flowchart LR
     A[WASAPI loopback<br/>48 kHz stereo int16] --> B[AudioCaptureLive<br/>ring buffer, 5 min cap]
     B --> C[AudioConverter<br/>mono float32 16 kHz]
-    C --> D{Mode}
-    D -->|VAD| E[Silero VAD ONNX<br/>32 ms frames]
-    E -->|pause or 4 s max| F[Whisper]
-    D -->|Fast / Accurate| F
-    F --> G[Word list<br/>absolute timestamps]
+    C --> D[Silero VAD ONNX<br/>32 ms frames]
+    D -->|speech window| E[Whisper partials every 0.6 s]
+    D -->|pause or 4 s max| F[Whisper final]
+    E --> G[Word list<br/>absolute timestamps]
+    F --> G
     G --> H[Dedup / revision logic]
     H --> I[Qt Signal]
     I --> J[Overlay + transcript box]
@@ -82,16 +82,16 @@ Stage details:
 
 | Stage | Where | Data in, data out |
 |---|---|---|
-| Capture | `services/audio_capture_live.py` | Reads 1024-frame chunks (`bytes`, int16, 2 ch, 48 kHz) into `self.frames: list[bytes]`, capped at 300 s |
+| Capture | `services/audio_capture_live.py` | Reads audio chunks into a locked capped deque, with an absolute chunk cursor |
 | Convert | `services/audio_conversion.py` | Joins chunks, stereo to mono (mean), int16 to float32 in [-1, 1], linear-interpolation resample to 16 kHz |
 | VAD | `services/vad_service.py` | 512-sample frame to speech probability (0..1), LSTM state kept between frames |
 | Segmenting | `services/vad_transcriber.py` | Probability stream to "segment_end" or "max_speech" events |
 | Transcribe | `services/whisper_service.py` | float32 array to `list[Word]` with relative timestamps |
 | Timestamps | `models/word.py::shift_timestamps` | Window-relative times to absolute session time |
 | Dedup | transcribers | Drops words already emitted (time grace and text/time proximity) |
-| Deliver | `controllers/transcription_controller.py` | Background thread calls `on_words_callback(words)` |
+| Deliver | `controllers/transcription_controller.py` | Background thread calls final-word and live-partial callbacks |
 | Marshal | `views/main_window.py` | `_words_ready` Qt Signal moves data to the GUI thread |
-| Render | `views/subtitle_overlay.py` | Last 10 words shown; transcript box capped at 20,000 chars |
+| Render | `views/subtitle_overlay.py`, `views/main_window.py` | Sentence-paced, stable-width overlay; transcript preview tracks partials then replaces them with finals; capped at 20,000 chars |
 
 Whisper call settings (`whisper_service.py`): `beam_size=5`, `best_of=2`, `vad_filter=True`, `word_timestamps=True`, `condition_on_previous_text=False`, `no_speech_threshold=0.6`. Device: `cuda`/`float16` when GPU is on, otherwise `cpu`/`int8`. `use_gpu=None` means auto-detect with `ctranslate2.get_cuda_device_count()`.
 
@@ -208,12 +208,12 @@ No API keys or secrets are used anywhere.
 | `MIN_SEGMENT_SEC` | 0.15 | `vad_transcriber.py` | Shorter segments ignored |
 | `MAX_SPEECH_SEC` | 4.0 | `vad_transcriber.py` | Forces a transcription mid-speech |
 | `CONTEXT_SEC` / `OVERLAP_SEC` / `FLUSH_CUTOFF_SEC` | 0.5 / 0.8 / 0.4 | `vad_transcriber.py` | Audio context and forced-flush handling |
-| Tick interval and window | VAD 0.05 s; Fast 0.3 s with 2.0 s window; Accurate 0.7 s with 3.5 s window | `transcription_controller.py` | How often Whisper runs |
+| Transcription tick | 0.05 s; partial inference every 0.6 s during speech | `transcription_controller.py`, `vad_transcriber.py` | Single speech-gated pipeline |
 | `CaptionBuilder.MAX_CHARS_PER_LINE` / `MAX_LINES` | 42 / 2 | `caption_builder.py` | Caption size bound |
 | `CaptionBuilder.GAP_NEW_CAPTION_SEC` | 1.2 | `caption_builder.py` | Pause that starts a new caption |
 | `CaptionBuilder.MIN_HOLD_SEC` / `HOLD_PER_CHAR_SEC` | 1.5 / 0.05 | `caption_builder.py` | Caption hold time |
 | `VadTranscriber.CONTEXT_PROMPT_CHARS` | 150 | `vad_transcriber.py` | Previous text given to Whisper |
-| `MAX_TRANSCRIPT_CHARS` | 20,000 | `main_window.py` | Transcript box cap |
+| `MAX_TRANSCRIPT_CHARS` | 20,000 | `main_window.py` | Live/final transcript box cap |
 | `MAX_SENSES` | 4 | `subtitle_overlay.py` | Senses shown in the detail dialog |
 
 ## 10. Module map
@@ -281,7 +281,7 @@ Removed on purpose: `torch`, `torchaudio`, `torchvision` (multi-GB, were only ne
 ### Suspected or unexplained
 
 2. **UNEXPLAINED crash.** The app exited with code 1 and no Python traceback after two normal load/start/stop cycles. Probably a native-level fault. `faulthandler` now writes to `logs/faulthandler.log`. Read that first if it recurs.
-3. **UNVERIFIED: heat and lag over a full film.** Never measured. Fast/Accurate modes re-run Whisper constantly and are inherently heavy.
+3. **UNVERIFIED: heat and lag over a full film.** Never measured.
 
 ### Smaller debt
 
@@ -290,10 +290,9 @@ Removed on purpose: `torch`, `torchaudio`, `torchvision` (multi-GB, were only ne
 - Model load runs synchronously on the GUI thread, so the window freezes while loading.
 - Definitions cache key is `(word, lang)` and ignores the target language.
 - Silero model is downloaded from the GitHub `master` branch with no pinned version or checksum.
-- `LiveTranscriber` accepts a `vad` argument it never uses; `start_overlapping_chunked_background` is a legacy alias.
 - `device_id` default `10` is hard-coded in two places.
 - The overlay is fixed near the top of the primary screen (y=60) and is not click-through.
-- Test coverage is thin: recorder buffer, VAD partial/final flow, stabilizer, caption builder and Whisper guards (`tests/`). Dedup/revision logic, `AudioConverter`, cache and UI are untested.
+- Test coverage is thin: recorder buffer, VAD partial/final flow, stabilizer, caption builder, Whisper guards and translation callbacks (`tests/`). Dedup/revision logic, `AudioConverter`, cache and UI are untested.
 - `README.md` and `VAD_INTEGRATION.md` describe the early prototype (torch-based VAD) and are outdated. GitHub setup instructions still need to be written.
 - Unreviewed files in the repo root: `.claude/`, `live.wav`, a personal `.wav`, `word_cache.db*`. Do not delete without asking.
 
