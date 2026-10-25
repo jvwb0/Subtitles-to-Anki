@@ -132,21 +132,11 @@ class MainWindow(QMainWindow):
         self.save_wav_check.setToolTip("Save last 5 min of audio to disk after stopping\n(buffer is capped, no RAM impact)")
         grid.addWidget(self.save_wav_check, 3, 2, 1, 2)
 
-        # ── mode + translate ──────────────────────────────────────────
-        grid.addWidget(QLabel("Mode:"), 4, 0)
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems([
-            "Fast (300ms, quick response)",
-            "VAD (pause detection, lowest resource use)",
-            "Accurate (700ms, continuous speech)",
-        ])
-        self.mode_combo.setCurrentIndex(1)  # default to VAD — lowest CPU/GPU load for long sessions
-        grid.addWidget(self.mode_combo, 4, 1, 1, 2)
-
+        # -- translate --
         self.translate_check = QCheckBox("Translate → EN")
         self.translate_check.setToolTip("Translate foreign speech to English subtitles\n(uses Whisper's built-in translation)")
         self.translate_check.toggled.connect(self._on_translate_toggle)
-        grid.addWidget(self.translate_check, 4, 3)
+        grid.addWidget(self.translate_check, 4, 1, 1, 2)
 
         self.dual_sub_check = QCheckBox("Show Translation (EN)")
         self.dual_sub_check.setToolTip("Show English translation below the original subtitles\n(uses Google Translate — requires internet)")
@@ -325,12 +315,9 @@ class MainWindow(QMainWindow):
         self.overlay.show()
         self._caption_timer.start(CAPTION_TICK_MS)
 
-        mode_map = {0: "fast", 1: "vad", 2: "accurate"}
-        mode = mode_map[self.mode_combo.currentIndex()]
         self.controller.start_live_background(
             on_words_callback=self._on_words,
             on_partial_callback=self._on_partial,
-            mode=mode,
         )
 
     def _stop(self):

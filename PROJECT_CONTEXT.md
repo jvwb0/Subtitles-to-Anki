@@ -49,8 +49,7 @@ The owner is a learner building this for personal use, with a plan to publish it
 | Whisper | OpenAI speech-to-text model, run here through `faster-whisper` |
 | ctranslate2 | Inference engine under faster-whisper; owns GPU/CUDA use |
 | Silero VAD | Tiny (~2 MB) voice-activity-detection model; says whether a 32 ms audio frame contains speech |
-| VAD mode | Transcribe only after a speech pause; lowest resource use; the default |
-| Fast / Accurate mode | Re-transcribe a sliding audio window every 0.3 s / 0.7 s regardless of speech; heavy |
+| Live pipeline | Single mode: Whisper runs on speech only, with live partial text every 0.6 s and a final at each pause |
 | Provisional / confirmed word | Confidence state of a word in the sliding-window modes (see `Word`) |
 | Overlay | The borderless always-on-top subtitle bar |
 | Hover card / detail dialog | Small definition popup / full word-detail window |
@@ -210,7 +209,6 @@ No API keys or secrets are used anywhere.
 | `MAX_SPEECH_SEC` | 4.0 | `vad_transcriber.py` | Forces a transcription mid-speech |
 | `CONTEXT_SEC` / `OVERLAP_SEC` / `FLUSH_CUTOFF_SEC` | 0.5 / 0.8 / 0.4 | `vad_transcriber.py` | Audio context and forced-flush handling |
 | Tick interval and window | VAD 0.05 s; Fast 0.3 s with 2.0 s window; Accurate 0.7 s with 3.5 s window | `transcription_controller.py` | How often Whisper runs |
-| `MIN_WORD_PROB`, `MAX_NO_SPEECH_PROB`, `REVISION_WINDOW_SEC`, `MIN_OVERLAP_RATIO`, `NGRAM_N` | 0.55, 0.70, 2.5, 0.6, 2 | `live_transcriber.py` | Sliding-window filtering and revision |
 | `CaptionBuilder.MAX_CHARS_PER_LINE` / `MAX_LINES` | 42 / 2 | `caption_builder.py` | Caption size bound |
 | `CaptionBuilder.GAP_NEW_CAPTION_SEC` | 1.2 | `caption_builder.py` | Pause that starts a new caption |
 | `CaptionBuilder.MIN_HOLD_SEC` / `HOLD_PER_CHAR_SEC` | 1.5 / 0.05 | `caption_builder.py` | Caption hold time |
@@ -228,7 +226,6 @@ No API keys or secrets are used anywhere.
 | `App/services/whisper_service.py` | Speech-to-text | `ITranscriptionEngine` |
 | `App/services/audio_capture_live.py` | Loopback capture and buffer | `IAudioRecorder` |
 | `App/services/vad_service.py` | Silero VAD on ONNX Runtime | `IVoiceActivityDetector` |
-| `App/services/live_transcriber.py` | Fast/Accurate sliding-window transcriber | n/a |
 | `App/services/vad_transcriber.py` | Pause-gated transcriber | n/a |
 | `App/services/definition_service.py` | Dictionary lookups plus display helpers | `IDefinitionProvider` via `DefinitionService` |
 | `App/services/translation_service.py` | Debounced Google translation | `ITranslationProvider` |
@@ -246,7 +243,7 @@ No API keys or secrets are used anywhere.
 | `App/views/native_effects.py` | Mica backdrop and dark title bar via DWM | n/a |
 | `App/utils/app_logger.py`, `text_utils.py` | Logging setup; punctuation stripping | n/a |
 
-Public `AppController` API (views must use only this): `load_transcription(config)`, `unload_transcription()`, `is_transcription_loaded`, `is_recording`, `set_translate(bool)`, `start_live_background(on_words_callback, mode)`, `start_overlapping_chunked_background(...)` (legacy), `stop_live_background(save_wav)`, `is_dual_subtitle_enabled`, `set_dual_subtitle(bool)`, `translate_subtitle(text, source_lang, callback)`, `fetch_hover_definition(...)`, `fetch_full_definition(...)`, `ensure_anki_ready(...)`, `create_anki_deck(...)`, `save_to_anki(...)`.
+Public `AppController` API (views must use only this): `load_transcription(config)`, `unload_transcription()`, `is_transcription_loaded`, `is_recording`, `set_translate(bool)`, `start_live_background(on_words_callback, on_partial_callback)`, `stop_live_background(save_wav)`, `is_dual_subtitle_enabled`, `set_dual_subtitle(bool)`, `translate_subtitle(text, source_lang, callback)`, `fetch_hover_definition(...)`, `fetch_full_definition(...)`, `ensure_anki_ready(...)`, `create_anki_deck(...)`, `save_to_anki(...)`.
 
 ## 11. Threading model
 

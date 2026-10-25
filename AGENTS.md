@@ -45,7 +45,7 @@ Not done / unverified (do not claim these are solved):
 - Partial text still flickers a little in the unstable tail, and a forced 4 s flush can still cut a sentence (split at the quietest point is planned). Hallucination guards and the context prompt were only checked on one clip; the prompt can also let a wrong word propagate - watch for it.
 - Real-audio quality has only been checked on one 57 s mixed English/Portuguese clip; no WER measurement, no long-session soak, and the live GUI was not run by the agent that made the partial-caption change (only the window logic was exercised headless; the new CaptionBuilder wiring has not been seen live either).
 - **Unexplained crash.** The app once exited with code 1 and no Python traceback, so it was probably a native-level fault. Cause is unconfirmed. `faulthandler` was added; if it recurs, read `logs/faulthandler.log` first, then `logs/app.log`.
-- **Long-session heat/lag has not been measured** on a real full-length film. The only changes made are the transcript cap and recommending VAD mode. Fast/Accurate modes re-run Whisper on a sliding window every 0.3–0.7 s regardless of speech, which is inherently heavy.
+- **Long-session heat/lag has not been measured** on a real full-length film. The only changes made are the transcript cap and recommending VAD mode. There is only one pipeline now (speech-gated), so idle audio costs almost nothing.
 - Visual polish of the new GUI has only been partly reviewed by the owner (see backlog).
 - `README.md` and `VAD_INTEGRATION.md` are outdated (they describe the early prototype and the torch-based VAD). Setup instructions for GitHub users still need to be written.
 - `.claude/` and loose files in the repo root (`live.wav`, a personal `.wav`, `word_cache.db*`) have not been reviewed; do not delete them without asking.
@@ -76,7 +76,7 @@ Key services:
 - `whisper_service.py` — faster-whisper; device chosen from `use_gpu` (True/False/None=auto via `ctranslate2.get_cuda_device_count()`).
 - `vad_service.py` — Silero VAD via ONNX Runtime; model auto-downloaded to `~/.cache/silero_vad/` on first run.
 - `audio_capture_live.py` — WASAPI loopback capture, ring buffer capped at 5 minutes. Methods are snake_case (`read_chunk`, `get_recent_chunks`).
-- `live_transcriber.py` (Fast/Accurate sliding-window mode with provisional/confirmed words) and `vad_transcriber.py` (transcribe only on speech pauses; lowest resource use, default).
+- `vad_transcriber.py`: the single live pipeline (speech-gated finals plus live partial text). The old Fast/Accurate sliding-window `live_transcriber.py` and the mode selector were removed 2026-10-25: re-transcribing a sliding window produced repeated/cut-off words in the user's recordings, while the same audio through this pipeline gave clean sentences (mean delay 0.68 s, flicker 7.2/100).
 - `definition_service.py` (freedictionaryapi.com), `translation_service.py` (Google via deep-translator, debounced), `cache_service.py` (SQLite `word_cache.db` at repo root), `anki_service.py` + `anki_note_template.py` (AnkiConnect at localhost:8765, card HTML/CSS).
 
 Threading model:

@@ -17,7 +17,6 @@ class TranscriptionController:
         self.whisper = None
         self.vad = None
         self.live_recorder = None
-        self.streaming_transcriber = None
         self.vad_transcriber = None
         self._active_transcriber = None
         self.is_recording = False
@@ -34,7 +33,6 @@ class TranscriptionController:
         from services.whisper_service import WhisperService
         from services.vad_service import VadService
         from services.audio_capture_live import AudioCaptureLive
-        from services.live_transcriber import LiveTranscriber
         from services.vad_transcriber import VadTranscriber
 
         self.config = config
@@ -42,9 +40,6 @@ class TranscriptionController:
         self.vad = VadService()
         self.live_recorder = AudioCaptureLive(device=config.device_id)
 
-        self.streaming_transcriber = LiveTranscriber(
-            self.whisper, self.live_recorder, self.vad, config.language
-        )
         self.vad_transcriber = VadTranscriber(
             self.whisper, self.live_recorder, self.vad, config.language
         )
@@ -61,7 +56,6 @@ class TranscriptionController:
         self.whisper = None
         self.vad = None
         self.live_recorder = None
-        self.streaming_transcriber = None
         self.vad_transcriber = None
         self._active_transcriber = None
         self.is_recording = False
@@ -80,8 +74,6 @@ class TranscriptionController:
         """Toggle Whisper translate mode (any language → English) at runtime."""
         self._translate = enabled
         task = "translate" if enabled else "transcribe"
-        if self.streaming_transcriber:
-            self.streaming_transcriber.task = task
         if self.vad_transcriber:
             self.vad_transcriber.task = task
 
@@ -111,47 +103,33 @@ class TranscriptionController:
     # Background sessions (non-blocking)
     # ==================================================================
 
-    def start_background(self, on_words_callback=None, mode="fast", on_partial_callback=None):
-        """Live transcription with three modes: 'fast', 'vad', 'accurate'.
+    TICK_INTERVAL_SEC = 0.05
 
-        on_words_callback(words)    final words (all modes).
-        on_partial_callback(words)  live text of the open segment (vad mode only);
+    def start_background(self, on_words_callback=None, on_partial_callback=None):
+        """Live transcription: speech-gated, with live partial text while a sentence is spoken.
+
+        on_words_callback(words)    final words.
+        on_partial_callback(words)  live text of the open segment;
                                     an empty list means the partial text was superseded.
         """
         if self.is_recording:
             return
 
-        if mode == "vad":
-            self._active_transcriber = self.vad_transcriber
-            tick_interval = 0.05
-            window_sec = None
-        elif mode == "fast":
-            self._active_transcriber = self.streaming_transcriber
-            tick_interval = 0.3
-            window_sec = 2.0
-        else:  # accurate
-            self._active_transcriber = self.streaming_transcriber
-            tick_interval = 0.7
-            window_sec = 3.5
-
+        self._active_transcriber = self.vad_transcriber
         self._start_recorder("live.wav")
 
         def transcription_loop():
             while self.is_recording and not self._shutdown_requested:
                 try:
-                    if mode == "vad":
-                        new_words, partial = self._active_transcriber.tick()
-                        if partial is not None and on_partial_callback:
-                            on_partial_callback(partial)
-                    else:
-                        new_words, _ = self._active_transcriber.tick(window_sec=window_sec)
-
+                    new_words, partial = self._active_transcriber.tick()
+                    if partial is not None and on_partial_callback:
+                        on_partial_callback(partial)
                     if new_words and on_words_callback:
                         on_words_callback(new_words)
                 except Exception:
                     if not self._shutdown_requested:
                         logger.exception("Transcription error")
-                time.sleep(tick_interval)
+                time.sleep(self.TICK_INTERVAL_SEC)
 
         self._audio_thread = threading.Thread(target=self._audio_capture_loop, daemon=True)
         self._trans_thread = threading.Thread(target=transcription_loop, daemon=True)
