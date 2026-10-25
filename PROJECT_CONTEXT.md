@@ -273,10 +273,10 @@ Removed on purpose: `torch`, `torchaudio`, `torchvision` (multi-GB, were only ne
 
 ### Critical
 
-1. **CONFIRMED: transcription stalls once the 5-minute audio buffer fills.**
+1. **FIXED (was CONFIRMED): transcription stalled once the 5-minute audio buffer filled.**
    Reproduced with a fake stream and a 100-chunk cap: the VAD clock advanced to 2.11 s and then froze while chunks kept arriving. Cause: `AudioCaptureLive.read_chunk` trims `self.frames` to a fixed length, and the transcribers use `len(self.recorder.frames)` both as the read cursor (`VadTranscriber._run_vad`) and as the session clock (`VadTranscriber._abs_now`, `LiveTranscriber.tick`). After the cap, the length stops growing, so the default VAD mode stops seeing new audio and absolute timestamps stop advancing. This directly blocks the whole-film goal.
    Fix direction: keep a monotonic `total_chunks` counter in `AudioCaptureLive`, derive time and cursors from it, and use a `collections.deque(maxlen=...)` instead of re-slicing the list.
-   Status: not fixed.
+   Status: **fixed 2026-10-25.** `AudioCaptureLive` keeps a `deque(maxlen)` and a monotonic `total_chunks`; `elapsed_sec` is the session clock and `chunks_since(cursor)` is the read cursor (resumes from the oldest kept chunk if the cursor was trimmed). `VadTranscriber` and `LiveTranscriber` use them. Regression tests: `tests/test_vad_pipeline.py`.
 
 ### Suspected or unexplained
 
@@ -286,14 +286,14 @@ Removed on purpose: `torch`, `torchaudio`, `torchvision` (multi-GB, were only ne
 ### Smaller debt
 
 - `Word.startTime` and `endTime` are camelCase; everything else is snake_case.
-- `read_chunk` re-slices a ~14,000-item list on every chunk once capped (wasteful copy).
+- `AudioCaptureLive.frames` now returns a copy of the buffer; hot paths use `chunks_since` / `get_recent_chunks`, but `get_recent_chunks` still copies the deque to slice it.
 - Model load runs synchronously on the GUI thread, so the window freezes while loading.
 - Definitions cache key is `(word, lang)` and ignores the target language.
 - Silero model is downloaded from the GitHub `master` branch with no pinned version or checksum.
 - `LiveTranscriber` accepts a `vad` argument it never uses; `start_overlapping_chunked_background` is a legacy alias.
 - `device_id` default `10` is hard-coded in two places.
 - The overlay is fixed near the top of the primary screen (y=60) and is not click-through.
-- No automated tests exist; all verification so far was manual smoke scripts and `get_errors`.
+- Test coverage is thin: only the recorder buffer and VAD partial/final flow (`tests/`). Dedup/revision logic, `AudioConverter`, cache and UI are untested.
 - `README.md` and `VAD_INTEGRATION.md` describe the early prototype (torch-based VAD) and are outdated. GitHub setup instructions still need to be written.
 - Unreviewed files in the repo root: `.claude/`, `live.wav`, a personal `.wav`, `word_cache.db*`. Do not delete without asking.
 
@@ -316,8 +316,10 @@ Removed on purpose: `torch`, `torchaudio`, `torchvision` (multi-GB, were only ne
 ## 15. Roadmap
 
 Immediate (blocks the main goal):
-1. Fix the buffer-cap stall (section 13, item 1), then test a 30+ minute run in VAD mode.
+1. ~~Fix the buffer-cap stall~~ (done); now run a 30+ minute VAD-mode soak on a real film.
 2. Measure CPU, GPU, RAM and temperature over a long session.
+2b. Caption quality: sentence-paced 2-line captions instead of the rolling 10 words, punctuation/context prompting, hallucination guards for music/silence, smoother partial text (stable-prefix), split forced flushes at the quietest point. Measure with `tools/replay_wav.py` (add WER against `.srt` ground truth).
+2c. Context-aware dual captions and learner hover cards per AGENTS.md section 2b; Anki template last.
 
 Next:
 3. Rewrite `README.md` with accurate install and run steps; update or delete `VAD_INTEGRATION.md`.

@@ -1,5 +1,8 @@
+import threading
 import time
 import wave
+from collections import deque
+
 import pyaudiowpatch
 
 from interfaces.audio_recorder import IAudioRecorder
@@ -25,11 +28,25 @@ class AudioCaptureLive(IAudioRecorder):
         self.p = None
         self.stream = None
 
-        self.frames: list[bytes] = []
         self._max_chunks = int((self.MAX_BUFFER_SECONDS * self.rate) / self.chunk)
+        self._lock = threading.Lock()
+        self._frames: deque[bytes] = deque(maxlen=self._max_chunks)
+        # Chunks ever captured; unaffected by the 5-minute trim, so it is a stable clock/cursor.
+        self.total_chunks = 0
+
+    @property
+    def frames(self) -> list[bytes]:
+        with self._lock:
+            return list(self._frames)
+
+    @property
+    def elapsed_sec(self) -> float:
+        return (self.total_chunks * self.chunk) / self.rate
 
     def start(self, filename: str | None = None):
-        self.frames = []
+        with self._lock:
+            self._frames.clear()
+            self.total_chunks = 0
         self.filename = filename or f"outputs/live_{int(time.time())}.wav"
 
         self.p = pyaudiowpatch.PyAudio()
@@ -50,16 +67,17 @@ class AudioCaptureLive(IAudioRecorder):
         """
         try:
             data = self.stream.read(self.chunk, exception_on_overflow=False)
-            self.frames.append(data)
-            
-            # Cap the buffer - keep only last MAX_BUFFER_SECONDS
-            if len(self.frames) > self._max_chunks:
-                self.frames = self.frames[-self._max_chunks:]
-            
+            self.append_chunk(data)
             return data
-        except Exception as e:
+        except Exception:
             # Expected during shutdown - stream.stop_stream() causes read() to fail
             return b""
+
+    def append_chunk(self, data: bytes):
+        """Store one captured chunk; the deque drops the oldest once the cap is reached."""
+        with self._lock:
+            self._frames.append(data)
+            self.total_chunks += 1
 
     def get_recent_chunks(self, seconds: float) -> list[bytes]:
         """Returns raw PCM chunks (bytes) for the last N seconds."""
@@ -70,10 +88,20 @@ class AudioCaptureLive(IAudioRecorder):
         if chunks_needed <= 0:
             return []
 
-        if len(self.frames) <= chunks_needed:
-            return self.frames
+        with self._lock:
+            return list(self._frames)[-chunks_needed:]
 
-        return self.frames[-chunks_needed:]
+    def chunks_since(self, cursor: int) -> tuple[list[bytes], int]:
+        """Chunks captured after absolute index `cursor`, and the new cursor.
+
+        If the wanted chunks were already trimmed, resumes from the oldest one kept.
+        """
+        with self._lock:
+            total = self.total_chunks
+            wanted = total - cursor
+            if wanted <= 0:
+                return [], total
+            return list(self._frames)[-wanted:], total
 
     def cleanup_and_save(self, save_wav: bool = True) -> str | None:
         """
@@ -104,7 +132,8 @@ class AudioCaptureLive(IAudioRecorder):
                 self.p = None
 
         # Save WAV if requested
-        if not save_wav or not self.frames:
+        frames = self.frames
+        if not save_wav or not frames:
             return None
 
         try:
@@ -112,7 +141,7 @@ class AudioCaptureLive(IAudioRecorder):
                 wf.setnchannels(self.channels)
                 wf.setsampwidth(2)  # 16-bit
                 wf.setframerate(self.rate)
-                wf.writeframes(b"".join(self.frames))
+                wf.writeframes(b"".join(frames))
             return self.filename
         except Exception as e:
             print(f"❌ Error saving WAV: {e}")

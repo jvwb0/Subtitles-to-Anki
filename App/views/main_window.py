@@ -27,6 +27,7 @@ class MainWindow(QMainWindow):
     # Background threads (transcription loop) emit through this signal;
     # Qt automatically queues the delivery onto the GUI thread.
     _words_ready = Signal(list)
+    _partial_ready = Signal(list)
 
     def __init__(self):
         super().__init__()
@@ -41,9 +42,11 @@ class MainWindow(QMainWindow):
         self.is_running = False
         self.model_loaded = False
         self._subtitle_buffer: list = []
+        self._partial_words: list = []  # live text of the segment still being spoken
         self._transcript_chars = 0
 
         self._words_ready.connect(self._on_words_main_thread)
+        self._partial_ready.connect(self._on_partial_main_thread)
 
         self._has_psutil = False
         try:
@@ -320,7 +323,11 @@ class MainWindow(QMainWindow):
 
         mode_map = {0: "fast", 1: "vad", 2: "accurate"}
         mode = mode_map[self.mode_combo.currentIndex()]
-        self.controller.start_live_background(on_words_callback=self._on_words, mode=mode)
+        self.controller.start_live_background(
+            on_words_callback=self._on_words,
+            on_partial_callback=self._on_partial,
+            mode=mode,
+        )
 
     def _stop(self):
         if not self.is_running:
@@ -343,6 +350,27 @@ class MainWindow(QMainWindow):
         """Called on the transcription background thread — never touch widgets here."""
         self._words_ready.emit(words)
 
+    def _on_partial(self, words):
+        """Transcription thread: live text for the open segment ([] = superseded)."""
+        self._partial_ready.emit(words)
+
+    def _on_partial_main_thread(self, words):
+        try:
+            self._set_partial_words(words)
+        except Exception:
+            logger.exception("Failed to show partial words")
+
+    def _set_partial_words(self, words):
+        words = [w for w in words if w.text.strip()]
+        if [w.text for w in words] == [w.text for w in self._partial_words]:
+            return  # unchanged text: skip the overlay rebuild (keeps hover cards stable)
+        self._partial_words = words
+        self._refresh_overlay_words()
+
+    def _refresh_overlay_words(self):
+        shown = (self._subtitle_buffer + self._partial_words)[-MAX_SUBTITLE_WORDS:]
+        self.overlay.push_words(list(shown))
+
     def _on_words_main_thread(self, words):
         try:
             self._process_new_words(words)
@@ -356,8 +384,9 @@ class MainWindow(QMainWindow):
 
         self._subtitle_buffer.extend(new_words)
         self._subtitle_buffer = self._subtitle_buffer[-MAX_SUBTITLE_WORDS:]
+        self._partial_words = []  # the final text supersedes the live guess
 
-        self.overlay.push_words(list(self._subtitle_buffer))
+        self._refresh_overlay_words()
         self._append_transcript(" ".join(w.text for w in new_words))
 
         if self.controller.is_dual_subtitle_enabled:
@@ -395,6 +424,7 @@ class MainWindow(QMainWindow):
         self.transcript.clear()
         self._transcript_chars = 0
         self._subtitle_buffer.clear()
+        self._partial_words = []
         self.overlay.clear()
 
     def closeEvent(self, event):

@@ -6,6 +6,10 @@ Benefits:
 - Whisper sees complete speech segments with natural boundaries
 - Higher accuracy (no mid-sentence cuts)
 - Lower CPU (Whisper only called on pause events)
+
+While the speaker is still talking, a *partial* hypothesis of the current
+segment is produced every PARTIAL_INTERVAL_SEC so captions follow the speech
+closely. The final transcription at the pause replaces the partial text.
 """
 
 import numpy as np
@@ -25,6 +29,10 @@ class VadTranscriber:
     CONTEXT_SEC      = 0.5       # Context before segment for Whisper
     OVERLAP_SEC      = 0.8       # Tail kept for next segment on forced flush
     FLUSH_CUTOFF_SEC = 0.4       # Hold back last N seconds on forced flush
+
+    # Live partial text while speech is ongoing
+    PARTIAL_INTERVAL_SEC = 0.6   # re-transcribe the open segment this often
+    MIN_PARTIAL_SPEECH_SEC = 0.5 # don't guess before this much speech
 
     # Dedup
     TIME_GRACE_SEC   = 0.15
@@ -47,30 +55,37 @@ class VadTranscriber:
         self._vad_clock        = 0.0
         self._vad_buf          = np.array([], dtype=np.float32)
         self._chunk_cursor     = 0
+        self._last_partial_vad = 0.0
 
         self._last_emitted_end = 0.0
 
     def tick(self):
         """
-        Call every ~50ms. Returns (new_words, []) on speech boundary, else ([], []).
-        Returns tuple for API compatibility with streaming transcriber.
+        Call every ~50ms. Returns (final_words, partial_words):
+          - segment finished -> (final_words, [])      partial text is superseded
+          - speech ongoing   -> ([], partial_words)    refreshed every PARTIAL_INTERVAL_SEC
+          - nothing to report -> ([], None)            partial_words None = "no change"
         """
         event = self._run_vad()
         if event == "segment_end":
             return self._do_transcribe(forced=False), []
         if event == "max_speech":
             return self._do_transcribe(forced=True), []
-        return [], []
+        if self._partial_due():
+            return [], self._transcribe_partial()
+        return [], None
+
+    def _partial_due(self) -> bool:
+        if not self._in_speech:
+            return False
+        if self._last_speech_vad - self._speech_start_vad < self.MIN_PARTIAL_SPEECH_SEC:
+            return False
+        return self._vad_clock - self._last_partial_vad >= self.PARTIAL_INTERVAL_SEC
 
     def _run_vad(self):
-        n = len(self.recorder.frames)
-        if n < self._chunk_cursor:
-            self._chunk_cursor = n
-        if n <= self._chunk_cursor:
+        new_chunks, self._chunk_cursor = self.recorder.chunks_since(self._chunk_cursor)
+        if not new_chunks:
             return None
-
-        new_chunks = self.recorder.frames[self._chunk_cursor:n]
-        self._chunk_cursor = n
 
         audio = AudioConverter.chunks_to_float_mono_16k(
             new_chunks,
@@ -120,20 +135,10 @@ class VadTranscriber:
 
         return None
 
-    def _abs_now(self):
-        return (len(self.recorder.frames) * self.recorder.chunk) / self.recorder.rate
-
-    def _do_transcribe(self, forced: bool):
-        abs_now = self._abs_now()
-
-        if forced:
-            grab_sec = self.MAX_SPEECH_SEC + self.CONTEXT_SEC + 0.2
-        else:
-            speech_dur = self._last_speech_vad - self._speech_start_vad
-            silence_dur = self._vad_clock - self._last_speech_vad
-            grab_sec = self.CONTEXT_SEC + speech_dur + silence_dur + 0.2
-
-        grab_sec = min(grab_sec, abs_now)
+    def _transcribe_window(self, grab_sec: float) -> list:
+        """Transcribe the last `grab_sec` of audio; words carry absolute timestamps."""
+        abs_now = self.recorder.elapsed_sec
+        grab_sec = min(grab_sec, abs_now, self.recorder.MAX_BUFFER_SECONDS)
         if grab_sec <= 0:
             return []
 
@@ -150,12 +155,39 @@ class VadTranscriber:
             return []
 
         words = self.whisper.transcribe(audio, self.language, task=self.task)
-        if not words:
-            return []
+        shift_timestamps(words, max(0.0, abs_now - grab_sec))
+        return words
 
-        # Map to absolute timestamps
-        audio_start = max(0.0, abs_now - grab_sec)
-        shift_timestamps(words, audio_start)
+    def _backlog_sec(self) -> float:
+        """Audio captured but not yet consumed by VAD (inference blocks the tick loop)."""
+        return max(0.0, self.recorder.elapsed_sec - self._vad_clock)
+
+    def _unseen(self, words: list) -> list:
+        """Words not already emitted as final text."""
+        return [
+            w for w in words
+            if _strip_punct(w.text) and w.endTime > self._last_emitted_end + self.TIME_GRACE_SEC
+        ]
+
+    def _transcribe_partial(self) -> list:
+        self._last_partial_vad = self._vad_clock
+        speech_dur = self._last_speech_vad - self._speech_start_vad
+        grab_sec = self.CONTEXT_SEC + speech_dur + 0.2 + self._backlog_sec()
+        return self._unseen(self._transcribe_window(grab_sec))
+
+    def _do_transcribe(self, forced: bool):
+        abs_now = self.recorder.elapsed_sec
+        backlog = self._backlog_sec()
+
+        if forced:
+            grab_sec = self.MAX_SPEECH_SEC + self.CONTEXT_SEC + 0.2 + backlog
+        else:
+            speech_dur = self._last_speech_vad - self._speech_start_vad
+            silence_dur = self._vad_clock - self._last_speech_vad
+            grab_sec = self.CONTEXT_SEC + speech_dur + silence_dur + 0.2 + backlog
+
+        words = self._transcribe_window(grab_sec)
+        self._last_partial_vad = self._vad_clock
 
         # Forced flush: hold back unstable tail
         if forced:
@@ -163,15 +195,7 @@ class VadTranscriber:
             words = [w for w in words if w.endTime <= safe_abs]
             self._speech_start_vad = self._vad_clock - self.OVERLAP_SEC
 
-        # Dedup
-        new_words = []
-        for w in words:
-            if not _strip_punct(w.text):
-                continue
-            if w.endTime <= self._last_emitted_end + self.TIME_GRACE_SEC:
-                continue
-            new_words.append(w)
-
+        new_words = self._unseen(words)
         if new_words:
             self._last_emitted_end = new_words[-1].endTime
 

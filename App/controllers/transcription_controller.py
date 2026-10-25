@@ -111,8 +111,13 @@ class TranscriptionController:
     # Background sessions (non-blocking)
     # ==================================================================
 
-    def start_background(self, on_words_callback=None, mode="fast"):
-        """Live transcription with three modes: 'fast', 'vad', 'accurate'."""
+    def start_background(self, on_words_callback=None, mode="fast", on_partial_callback=None):
+        """Live transcription with three modes: 'fast', 'vad', 'accurate'.
+
+        on_words_callback(words)    final words (all modes).
+        on_partial_callback(words)  live text of the open segment (vad mode only);
+                                    an empty list means the partial text was superseded.
+        """
         if self.is_recording:
             return
 
@@ -135,7 +140,9 @@ class TranscriptionController:
             while self.is_recording and not self._shutdown_requested:
                 try:
                     if mode == "vad":
-                        new_words, _ = self._active_transcriber.tick()
+                        new_words, partial = self._active_transcriber.tick()
+                        if partial is not None and on_partial_callback:
+                            on_partial_callback(partial)
                     else:
                         new_words, _ = self._active_transcriber.tick(window_sec=window_sec)
 

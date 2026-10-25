@@ -87,8 +87,7 @@ class LiveTranscriber:  # KEPT SAME NAME
             return [], []
 
         # ── 1. Transcribe ────────────────────────────────────────────
-        total_chunks = len(self.recorder.frames)
-        recorded_sec = (total_chunks * self.recorder.chunk) / self.recorder.rate
+        recorded_sec = self.recorder.elapsed_sec
         window_start = max(0.0, recorded_sec - window_sec)
 
         words = self.whisper.transcribe(audio, self.language, task=self.task)

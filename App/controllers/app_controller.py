@@ -50,9 +50,13 @@ class AppController:
         """Toggle Whisper translate mode (any language → English) at runtime."""
         self._transcription.set_translate(enabled)
 
-    def start_live_background(self, on_words_callback=None, mode="fast", **_kwargs):
+    def start_live_background(self, on_words_callback=None, mode="fast",
+                              on_partial_callback=None, **_kwargs):
         """Live transcription with three modes: 'fast', 'vad', 'accurate'."""
-        self._transcription.start_background(on_words_callback=on_words_callback, mode=mode)
+        self._transcription.start_background(
+            on_words_callback=on_words_callback, mode=mode,
+            on_partial_callback=on_partial_callback,
+        )
 
     def start_overlapping_chunked_background(self, on_words_callback=None, **_kwargs):
         """Legacy method - uses accurate mode."""

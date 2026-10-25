@@ -19,6 +19,17 @@ class IAudioRecorder(ABC):
         """Return raw PCM chunks (bytes) for the last N seconds."""
         raise NotImplementedError
 
+    @property
+    @abstractmethod
+    def elapsed_sec(self) -> float:
+        """Total recorded time, unaffected by buffer trimming."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def chunks_since(self, cursor: int) -> tuple[list[bytes], int]:
+        """Chunks captured after absolute chunk index `cursor`, plus the new cursor."""
+        raise NotImplementedError
+
     @abstractmethod
     def cleanup_and_save(self, save_wav: bool = True) -> str | None:
         """Release the stream/device and optionally persist the buffer to a WAV file."""

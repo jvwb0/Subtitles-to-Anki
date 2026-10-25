@@ -18,7 +18,16 @@ Intended use: watching foreign-language video (e.g. a full Netflix film) and lea
 4. **Modern, friendly GUI.** The original Tkinter UI was rejected as ugly and old. Target: Windows 11 look, follows system light/dark, vibrant blue accent, new users should not be intimidated.
 5. **Debuggability.** The project will keep growing for months. Logging and error handling are a first-class concern.
 
-## 3. Status (as of 2026-10-12)
+## 2b. Product vision and linguistic principle (owner, 2026-10-25)
+
+Quality bar: **YouTube auto-captions or better** - fast, punctuated, paced with the speaker, never an endless run-on sentence. A light, no-hassle app that runs carefree beside a film. GPU preferred, must degrade gracefully to CPU.
+
+**Interpret, do not translate.** The user is an English speaker learning e.g. Portuguese/Spanish and wants to understand the language the way natives do.
+- The English caption line must be a meaning-faithful translation of the *whole finished sentence*, using the previous 1-2 sentences as context. Never word by word. Do not use Whisper's `translate` task for it. Google Translate is a stopgap, not the target (planned: local CTranslate2 model such as Opus-MT/NLLB; an optional small local LLM for idioms/register, off the live critical path).
+- The hover card is a **context-aware bilingual learner entry (target word -> English)**, not a target-language dictionary: the sense that applies *in this sentence* first (e.g. *ficar* = stay / become / be located), lemma + conjugation (*fui* -> *ser/ir*, preterite 1sg), part of speech, gender, register, one short example; multi-word units/idioms (*dar certo*) as one item. Today it still shows `senses[0]` from an online dictionary; replacing it is planned (offline Wiktionary-derived data + sentence-aware sense selection).
+- Anki: the owner has a very specific card layout and will share it **only after** the engineering is solid. Do not invent a template; keep the exporter's field mapping abstract.
+
+## 3. Status (as of 2026-10-25)
 
 Done:
 - Torch/torchaudio/torchvision removed. Silero VAD now runs on ONNX Runtime. GPU for Whisper comes from `ctranslate2` directly.
@@ -26,13 +35,17 @@ Done:
 - GUI rewritten from Tkinter to PySide6 with a central QSS theme (`views/theme.py`), Fusion style, Windows 11 Mica backdrop.
 - Logging system with rotating file, global exception hooks, Qt message forwarding, and `faulthandler`.
 - Transcript text box capped (it previously grew unbounded and slowed the UI over long sessions).
+- **5-minute stall fixed (2026-10-25).** `AudioCaptureLive` now uses a locked `deque(maxlen)` plus a monotonic `total_chunks`; consumers use `chunks_since(cursor)` and `elapsed_sec` instead of `len(frames)`. Covered by `tests/test_vad_pipeline.py`.
+- **Live partial captions in VAD mode (2026-10-25).** Measured by replaying a real 57 s recording (small model, CUDA) with `tools/replay_wav.py`: delay between a word ending and appearing on screen fell from **2.27 s mean / 3.55 s p90 to 0.79 s mean / 1.38 s p90**. Whisper itself takes only 0.2-0.3 s per 2-4 s of audio, so the old delay was batching (nothing shown until a pause or the 4 s cap), not inference. `VadTranscriber.tick()` now returns `(final_words, partial_words)`: `partial_words` is `None` for "no change", a list of live words while speech continues, and `[]` when a final result supersedes it. `MainWindow` shows `final buffer + partial` and skips overlay rebuilds when the partial text is unchanged.
+- Automated tests exist: `python -m unittest discover -s tests` (recorder buffer/cursor, VAD partial/final flow with fakes).
+- `tools/replay_wav.py`: replays a WAV through the real VAD+Whisper pipeline in real time and prints on-screen delay. Run it with the project `.venv` (it has the CUDA libraries): `.venv\Scripts\python.exe tools\replay_wav.py file.wav --model small --lang en`.
 
 Not done / unverified (do not claim these are solved):
-- **Confirmed bug: transcription stalls after the 5-minute audio buffer fills.** The transcribers use `len(recorder.frames)` as cursor and clock, and the capped list stops growing. Reproduced with a fake stream; not yet fixed. Details and fix direction in PROJECT_CONTEXT.md section 13.
+- **Caption pacing is still a rolling "last 10 words" window** (`MAX_SUBTITLE_WORDS`), not sentence/2-line captions; no punctuation prompting or hallucination guards (music/silence) yet. Partial text can flicker (words change between updates) and a forced 4 s flush can still cut a sentence.
+- Real-audio quality has only been checked on one 57 s mixed English/Portuguese clip; no WER measurement, no long-session soak, and the live GUI was not run by the agent that made the partial-caption change (only the window logic was exercised headless).
 - **Unexplained crash.** The app once exited with code 1 and no Python traceback, so it was probably a native-level fault. Cause is unconfirmed. `faulthandler` was added; if it recurs, read `logs/faulthandler.log` first, then `logs/app.log`.
 - **Long-session heat/lag has not been measured** on a real full-length film. The only changes made are the transcript cap and recommending VAD mode. Fast/Accurate modes re-run Whisper on a sliding window every 0.3–0.7 s regardless of speech, which is inherently heavy.
 - Visual polish of the new GUI has only been partly reviewed by the owner (see backlog).
-- **No automated tests exist.** Verification so far was manual smoke scripts and `get_errors`.
 - `README.md` and `VAD_INTEGRATION.md` are outdated (they describe the early prototype and the torch-based VAD). Setup instructions for GitHub users still need to be written.
 - `.claude/` and loose files in the repo root (`live.wav`, a personal `.wav`, `word_cache.db*`) have not been reviewed; do not delete them without asking.
 
