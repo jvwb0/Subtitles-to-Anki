@@ -15,6 +15,7 @@ closely. The final transcription at the pause replaces the partial text.
 import numpy as np
 from models.word import Word, shift_timestamps
 from services.audio_conversion import AudioConverter
+from services.partial_stabilizer import PartialStabilizer
 from utils.text_utils import strip_punct as _strip_punct
 
 
@@ -34,11 +35,18 @@ class VadTranscriber:
     PARTIAL_INTERVAL_SEC = 0.6   # re-transcribe the open segment this often
     MIN_PARTIAL_SPEECH_SEC = 0.5 # don't guess before this much speech
 
+    # Text of recent finals handed to Whisper to keep punctuation/casing consistent
+    CONTEXT_PROMPT_CHARS = 150
+
     # Dedup
     TIME_GRACE_SEC   = 0.15
 
     def __init__(self, whisper, recorder, vad, language: str = "en",
-                 task: str = "transcribe"):
+                 task: str = "transcribe", stabilize_partials: bool = True,
+                 use_context_prompt: bool = True):
+        self.stabilize_partials = stabilize_partials
+        self.use_context_prompt = use_context_prompt
+        self._stabilizer = PartialStabilizer()
         self.whisper  = whisper
         self.recorder = recorder
         self.vad      = vad
@@ -58,6 +66,8 @@ class VadTranscriber:
         self._last_partial_vad = 0.0
 
         self._last_emitted_end = 0.0
+        self._context_text     = ""
+        self._stabilizer.reset()
 
     def tick(self):
         """
@@ -154,7 +164,8 @@ class VadTranscriber:
         if audio.size == 0:
             return []
 
-        words = self.whisper.transcribe(audio, self.language, task=self.task)
+        prompt = self._context_text if self.use_context_prompt else None
+        words = self.whisper.transcribe(audio, self.language, task=self.task, prompt=prompt)
         shift_timestamps(words, max(0.0, abs_now - grab_sec))
         return words
 
@@ -173,7 +184,8 @@ class VadTranscriber:
         self._last_partial_vad = self._vad_clock
         speech_dur = self._last_speech_vad - self._speech_start_vad
         grab_sec = self.CONTEXT_SEC + speech_dur + 0.2 + self._backlog_sec()
-        return self._unseen(self._transcribe_window(grab_sec))
+        words = self._unseen(self._transcribe_window(grab_sec))
+        return self._stabilizer.update(words) if self.stabilize_partials else words
 
     def _do_transcribe(self, forced: bool):
         abs_now = self.recorder.elapsed_sec
@@ -196,7 +208,13 @@ class VadTranscriber:
             self._speech_start_vad = self._vad_clock - self.OVERLAP_SEC
 
         new_words = self._unseen(words)
+        self._stabilizer.reset()
         if new_words:
             self._last_emitted_end = new_words[-1].endTime
+            self._remember_context(new_words)
 
         return new_words
+
+    def _remember_context(self, words: list):
+        text = f"{self._context_text} {' '.join(w.text for w in words)}".strip()
+        self._context_text = text[-self.CONTEXT_PROMPT_CHARS:]

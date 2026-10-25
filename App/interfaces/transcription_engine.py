@@ -7,6 +7,11 @@ from models.word import Word
 
 class ITranscriptionEngine(ABC):
     @abstractmethod
-    def transcribe(self, audio, language: str = "en", task: str = "transcribe") -> list[Word]:
-        """Transcribe a float32 16kHz mono numpy array into timestamped words."""
+    def transcribe(self, audio, language: str = "en", task: str = "transcribe",
+                   prompt: str | None = None) -> list[Word]:
+        """Transcribe a float32 16kHz mono numpy array into timestamped words.
+
+        `prompt` is the text just before this audio; it steers punctuation,
+        casing and vocabulary so consecutive segments read consistently.
+        """
         raise NotImplementedError

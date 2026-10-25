@@ -54,7 +54,7 @@ class FakeWhisper:
     def __init__(self):
         self.calls = 0
 
-    def transcribe(self, audio, language="en", task="transcribe"):
+    def transcribe(self, audio, language="en", task="transcribe", prompt=None):
         self.calls += 1
         dur = len(audio) / RATE
         n = max(1, int(dur))

@@ -211,7 +211,10 @@ No API keys or secrets are used anywhere.
 | `CONTEXT_SEC` / `OVERLAP_SEC` / `FLUSH_CUTOFF_SEC` | 0.5 / 0.8 / 0.4 | `vad_transcriber.py` | Audio context and forced-flush handling |
 | Tick interval and window | VAD 0.05 s; Fast 0.3 s with 2.0 s window; Accurate 0.7 s with 3.5 s window | `transcription_controller.py` | How often Whisper runs |
 | `MIN_WORD_PROB`, `MAX_NO_SPEECH_PROB`, `REVISION_WINDOW_SEC`, `MIN_OVERLAP_RATIO`, `NGRAM_N` | 0.55, 0.70, 2.5, 0.6, 2 | `live_transcriber.py` | Sliding-window filtering and revision |
-| `MAX_SUBTITLE_WORDS` | 10 | `main_window.py` | Words shown on the overlay |
+| `CaptionBuilder.MAX_CHARS_PER_LINE` / `MAX_LINES` | 42 / 2 | `caption_builder.py` | Caption size bound |
+| `CaptionBuilder.GAP_NEW_CAPTION_SEC` | 1.2 | `caption_builder.py` | Pause that starts a new caption |
+| `CaptionBuilder.MIN_HOLD_SEC` / `HOLD_PER_CHAR_SEC` | 1.5 / 0.05 | `caption_builder.py` | Caption hold time |
+| `VadTranscriber.CONTEXT_PROMPT_CHARS` | 150 | `vad_transcriber.py` | Previous text given to Whisper |
 | `MAX_TRANSCRIPT_CHARS` | 20,000 | `main_window.py` | Transcript box cap |
 | `MAX_SENSES` | 4 | `subtitle_overlay.py` | Senses shown in the detail dialog |
 
@@ -293,7 +296,7 @@ Removed on purpose: `torch`, `torchaudio`, `torchvision` (multi-GB, were only ne
 - `LiveTranscriber` accepts a `vad` argument it never uses; `start_overlapping_chunked_background` is a legacy alias.
 - `device_id` default `10` is hard-coded in two places.
 - The overlay is fixed near the top of the primary screen (y=60) and is not click-through.
-- Test coverage is thin: only the recorder buffer and VAD partial/final flow (`tests/`). Dedup/revision logic, `AudioConverter`, cache and UI are untested.
+- Test coverage is thin: recorder buffer, VAD partial/final flow, stabilizer, caption builder and Whisper guards (`tests/`). Dedup/revision logic, `AudioConverter`, cache and UI are untested.
 - `README.md` and `VAD_INTEGRATION.md` describe the early prototype (torch-based VAD) and are outdated. GitHub setup instructions still need to be written.
 - Unreviewed files in the repo root: `.claude/`, `live.wav`, a personal `.wav`, `word_cache.db*`. Do not delete without asking.
 
@@ -318,7 +321,7 @@ Removed on purpose: `torch`, `torchaudio`, `torchvision` (multi-GB, were only ne
 Immediate (blocks the main goal):
 1. ~~Fix the buffer-cap stall~~ (done); now run a 30+ minute VAD-mode soak on a real film.
 2. Measure CPU, GPU, RAM and temperature over a long session.
-2b. Caption quality: sentence-paced 2-line captions instead of the rolling 10 words, punctuation/context prompting, hallucination guards for music/silence, smoother partial text (stable-prefix), split forced flushes at the quietest point. Measure with `tools/replay_wav.py` (add WER against `.srt` ground truth).
+2b. Caption quality (done: sentence-paced captions, context prompt, hallucination guards, stable-prefix partials; remaining: split forced flushes at the quietest point, drop the double VAD after real-audio checks). Measure with `tools/replay_wav.py` (add WER against `.srt` ground truth).
 2c. Context-aware dual captions and learner hover cards per AGENTS.md section 2b; Anki template last.
 
 Next:

@@ -4,6 +4,7 @@ caption latency (how long after a word was spoken it is emitted).
 
 Usage (from repo root):
     python tools\replay_wav.py path\to\file.wav [--model small] [--cpu] [--lang en] [--max-sec 60]
+        [--no-stabilize] [--no-prompt]
 """
 
 import argparse
@@ -44,6 +45,26 @@ def percentile(values, pct):
     return values[min(len(values) - 1, int(len(values) * pct / 100))]
 
 
+def flicker_per_100(partials, final_walls):
+    """Words already on screen (all but the newest) that a later update rewrote."""
+    def key(w):
+        return "".join(c for c in w.text.lower() if c.isalnum())
+
+    changed = shown = 0
+    for (wall_a, a), (wall_b, b) in zip(partials, partials[1:]):
+        if any(wall_a < f <= wall_b for f in final_walls):
+            continue  # a final text in between legitimately resets the segment
+        stable = [key(w) for w in a[:-1]]
+        same = 0
+        for x, y in zip(stable, [key(w) for w in b]):
+            if x != y:
+                break
+            same += 1
+        changed += len(stable) - same
+        shown += len(b)
+    return 100.0 * changed / shown if shown else 0.0
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("wav")
@@ -51,6 +72,8 @@ def main():
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--lang", default="en")
     parser.add_argument("--max-sec", type=float, default=0)
+    parser.add_argument("--no-stabilize", action="store_true", help="show raw partial hypotheses")
+    parser.add_argument("--no-prompt", action="store_true", help="don't feed previous text to Whisper")
     args = parser.parse_args()
 
     with wave.open(args.wav, "rb") as wf:
@@ -59,7 +82,9 @@ def main():
     whisper = WhisperService(args.model, use_gpu=not args.cpu)
     vad = VadService()
     recorder = AudioCaptureLive(rate=rate, channels=channels)
-    transcriber = VadTranscriber(whisper, recorder, vad, args.lang)
+    transcriber = VadTranscriber(whisper, recorder, vad, args.lang,
+                                 stabilize_partials=not args.no_stabilize,
+                                 use_context_prompt=not args.no_prompt)
 
     done = threading.Event()
     t0 = time.monotonic()
@@ -106,6 +131,9 @@ def main():
     print("delay between a word ENDING and it appearing on screen")
     report("  final text only (old behaviour)", finals)
     report("  with live partial text         ", [(first_shown(wall, w), w) for wall, w in finals])
+
+    print(f"  flicker: {flicker_per_100(partials, [wall for wall, _ in finals]):.1f} "
+          "reworded words per 100 shown")
 
     print("\nfinal text by emission:")
     batch, last_wall = [], None

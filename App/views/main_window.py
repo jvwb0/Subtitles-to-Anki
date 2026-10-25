@@ -13,6 +13,7 @@ from controllers.app_controller import AppController
 from models.config import TranscriptionConfig
 from models.reference_data import LANGUAGES, MODEL_INFO
 from services.audio_device_service import AudioDeviceService
+from services.caption_builder import CaptionBuilder
 from utils.app_logger import get_logger
 from views.native_effects import apply_windows_backdrop
 from views.subtitle_overlay import SubtitleOverlay
@@ -20,7 +21,7 @@ from views.theme import Theme
 
 logger = get_logger(__name__)
 MAX_TRANSCRIPT_CHARS = 20_000  # cap so the widget can't grow unbounded over a long session
-MAX_SUBTITLE_WORDS = 10
+CAPTION_TICK_MS = 100  # how often caption expiry is checked
 
 
 class MainWindow(QMainWindow):
@@ -41,8 +42,10 @@ class MainWindow(QMainWindow):
 
         self.is_running = False
         self.model_loaded = False
-        self._subtitle_buffer: list = []
-        self._partial_words: list = []  # live text of the segment still being spoken
+        self._captions = CaptionBuilder()
+        self._shown_texts: list[str] = []
+        self._caption_timer = QTimer(self)
+        self._caption_timer.timeout.connect(self._refresh_overlay)
         self._transcript_chars = 0
 
         self._words_ready.connect(self._on_words_main_thread)
@@ -320,6 +323,7 @@ class MainWindow(QMainWindow):
         self.unload_btn.setEnabled(False)
         self.status_label.setText("Recording…")
         self.overlay.show()
+        self._caption_timer.start(CAPTION_TICK_MS)
 
         mode_map = {0: "fast", 1: "vad", 2: "accurate"}
         mode = mode_map[self.mode_combo.currentIndex()]
@@ -336,6 +340,7 @@ class MainWindow(QMainWindow):
         if self.controller.is_transcription_loaded:
             self.controller.stop_live_background(save_wav=self.save_wav_check.isChecked())
         self.is_running = False
+        self._caption_timer.stop()
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.unload_btn.setEnabled(True)
@@ -361,15 +366,18 @@ class MainWindow(QMainWindow):
             logger.exception("Failed to show partial words")
 
     def _set_partial_words(self, words):
-        words = [w for w in words if w.text.strip()]
-        if [w.text for w in words] == [w.text for w in self._partial_words]:
-            return  # unchanged text: skip the overlay rebuild (keeps hover cards stable)
-        self._partial_words = words
-        self._refresh_overlay_words()
+        self._captions.set_partial(words)
+        self._refresh_overlay()
 
-    def _refresh_overlay_words(self):
-        shown = (self._subtitle_buffer + self._partial_words)[-MAX_SUBTITLE_WORDS:]
-        self.overlay.push_words(list(shown))
+    def _refresh_overlay(self):
+        """Show the current caption; skips the rebuild when nothing changed (keeps hover cards stable)."""
+        shown = self._captions.visible()
+        texts = [w.text for w in shown]
+        if texts != self._shown_texts:
+            self._shown_texts = texts
+            self.overlay.push_words(list(shown))
+        if not shown or not self._captions.shows_committed_caption:
+            self.overlay.push_translation("")
 
     def _on_words_main_thread(self, words):
         try:
@@ -382,20 +390,23 @@ class MainWindow(QMainWindow):
         if not new_words:
             return
 
-        self._subtitle_buffer.extend(new_words)
-        self._subtitle_buffer = self._subtitle_buffer[-MAX_SUBTITLE_WORDS:]
-        self._partial_words = []  # the final text supersedes the live guess
-
-        self._refresh_overlay_words()
+        restarted = self._captions.add_final(new_words)
+        self._refresh_overlay()
         self._append_transcript(" ".join(w.text for w in new_words))
 
+        if restarted:
+            self.overlay.push_translation("")
         if self.controller.is_dual_subtitle_enabled:
-            sentence = " ".join(w.text for w in self._subtitle_buffer)
-            src_lang = self._get_transcription_lang()
+            caption = self._captions.committed_text()
             self.controller.translate_subtitle(
-                sentence, src_lang,
-                callback=lambda translated: self.overlay.push_translation(translated),
+                caption, self._get_transcription_lang(),
+                callback=lambda translated: self._show_translation(caption, translated),
             )
+
+    def _show_translation(self, caption: str, translated: str):
+        """BG thread: drop translations that arrive after the caption moved on."""
+        if caption == self._captions.committed_text():
+            self.overlay.push_translation(translated)
 
     def _append_transcript(self, text: str):
         chunk = text + " "
@@ -423,8 +434,8 @@ class MainWindow(QMainWindow):
     def _clear(self):
         self.transcript.clear()
         self._transcript_chars = 0
-        self._subtitle_buffer.clear()
-        self._partial_words = []
+        self._captions.clear()
+        self._shown_texts = []
         self.overlay.clear()
 
     def closeEvent(self, event):
