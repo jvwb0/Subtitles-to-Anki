@@ -3,12 +3,14 @@ import json
 import os
 import threading
 
+from interfaces.cache_repository import ICacheRepository
+
 _DB_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "word_cache.db")
 )
 
 
-class CacheService:
+class CacheService(ICacheRepository):
     _instance = None
     _class_lock = threading.Lock()
 

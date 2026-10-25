@@ -1,20 +1,20 @@
-# PyTorch with CUDA 12.8 (RTX 4070 / Ada Lovelace, driver 596+)
-# Install with: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
---extra-index-url https://download.pytorch.org/whl/cu128
-torch==2.10.0+cu128
-torchaudio==2.10.0+cu128
-torchvision==0.25.0+cu128
-
-# Core transcription
+# Core transcription (GPU support is automatic via ctranslate2's own CUDA
+# detection - no separate PyTorch/CUDA install needed. Requires NVIDIA driver
+# 470.57.02+ and CUDA 11/12 runtime libs to already be present for GPU use;
+# falls back to CPU otherwise)
 faster-whisper==1.2.1
 ctranslate2==4.6.3
 tokenizers==0.22.2
 
+# GUI (modern, hardware-accelerated, QSS/CSS-style theming — replaces Tkinter)
+PySide6==6.11.2
+
+# Voice activity detection (Silero VAD, ONNX Runtime backend - CPU only,
+# runs in <1ms per frame so GPU is unnecessary here)
+onnxruntime==1.23.2
+
 # Audio capture (Windows WASAPI loopback)
 PyAudioWPatch==0.2.12.8
-
-# VAD model download
-huggingface_hub==1.3.2
 
 # Numerics
 numpy==2.4.1

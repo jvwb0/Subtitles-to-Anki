@@ -2,6 +2,8 @@ import requests
 import re
 from urllib.parse import quote
 
+from interfaces.definition_provider import IDefinitionProvider
+
 BASE_URL = "https://freedictionaryapi.com/api/v1"
 
 LANG_NAMES = {
@@ -227,3 +229,13 @@ def _parse_inflection_base(definition: str) -> str | None:
     # take first token only (avoids grabbing trailing API notes)
     base = base.split()[0] if base else ""
     return base or None
+
+
+class DefinitionService(IDefinitionProvider):
+    """Thin OOP facade over the dictionary-lookup functions above."""
+
+    def fetch_definition(self, word: str, source_lang: str, target_lang: str) -> dict:
+        return fetch_definition(word, source_lang, target_lang)
+
+    def fetch_details(self, word: str, source_lang: str, target_lang: str) -> dict:
+        return fetch_details(word, source_lang, target_lang)

@@ -6,705 +6,476 @@ Hover  → quick definition card.
 Click  → pinned detail window with COMPLETE info (pronunciation, meanings, forms, examples).
 """
 
-import tkinter as tk
-from queue import Queue, Empty
+from PySide6.QtCore import Qt, Signal, QPoint, QTimer
+from PySide6.QtGui import QFont, QFontMetrics
+from PySide6.QtWidgets import (
+    QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout, QDialog,
+    QScrollArea, QPushButton, QApplication,
+)
 
 from services.definition_service import (
     LANG_NAMES, SKIP_TAGS,
     pick_pronunciations, pick_forms, is_inflection_definition,
 )
+from utils.app_logger import get_logger
+from views.theme import Theme
+
+logger = get_logger(__name__)
+MAX_SENSES = 4
+WORD_FONT = QFont("Segoe UI", 22, QFont.Weight.Bold)  # must match Theme.FONT_WORD, used for measuring line widths
 
 
-class SubtitleOverlay:
-    # ── layout constants ─────────────────────────────────────────────
-    MARGIN_X    = 24
-    MARGIN_Y    = 10
-    WORD_PAD_X  = 6
-    LINE_HEIGHT = 38
+class WordLabel(QLabel):
+    """A single clickable/hoverable word in the subtitle bar."""
 
-    # ── visual constants (IMPROVED) ──────────────────────────────────
-    BG              = "#0f0f1a"      # Darker, more modern
-    FG              = "#e5e7eb"      # Softer white
-    HOVER_FG        = "#60a5fa"      # Brighter blue
-    
-    # Card styling (modern, clean)
-    CARD_BG         = "#1a1b26"      # Dark blue-gray
-    CARD_BORDER     = "#414868"      # Subtle border
-    CARD_TITLE_FG   = "#bb9af7"      # Purple accent
-    CARD_DEF_FG     = "#c0caf5"      # Light blue-white
-    CARD_GRAM_FG    = "#9aa5ce"      # Muted blue
-    CARD_PRON_FG    = "#7aa2f7"      # Bright blue
-    CARD_EXAMPLE_FG = "#7dcfff"      # Cyan
-    CARD_SYN_FG     = "#9ece6a"      # Green
-    CARD_ANT_FG     = "#f7768e"      # Red
-    CARD_ERR_FG     = "#f7768e"      # Red for errors
-    CARD_SECTION_FG = "#565f89"      # Section headers
-    
-    # Fonts (improved hierarchy)
-    FONT_WORD       = ("Segoe UI", 22, "bold")
-    FONT_CARD_TITLE = ("Segoe UI", 16, "bold")      # Larger title
-    FONT_CARD_PRON  = ("Segoe UI", 12)              # Pronunciation
-    FONT_CARD_POS   = ("Segoe UI", 11, "italic")    # Part of speech
-    FONT_CARD_BODY  = ("Segoe UI", 11)
-    FONT_CARD_EXAMPLE = ("Segoe UI", 10, "italic")
-    FONT_CARD_META  = ("Segoe UI", 9)               # Small metadata
+    hovered = Signal(object, object)   # (word, label)
+    left = Signal()
+    clicked = Signal(object)           # word
 
-    # Translation line (dual subtitle)
-    FONT_TRANSLATION  = ("Segoe UI", 18)
-    TRANSLATION_FG    = "#9ca3af"       # Muted gray — visually secondary
-    TRANSLATION_PAD_Y = 6
+    def __init__(self, word_obj):
+        super().__init__(word_obj.text)
+        self.word_obj = word_obj
+        self._style_template = (
+            "color: {fg}; background: transparent; padding: 2px 6px; "
+            "font-family: 'Segoe UI'; font-size: 22px; font-weight: bold;"
+        )
+        self.setStyleSheet(self._style_template.format(fg=Theme.FG))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-    MAX_SENSES = 4
+    def enterEvent(self, event):
+        self.setStyleSheet(self._style_template.format(fg=Theme.HOVER_FG))
+        self.hovered.emit(self.word_obj, self)
+        super().enterEvent(event)
 
-    def __init__(self, master: tk.Tk,
-                 controller,
-                 get_source_lang=None,
-                 get_target_lang=None):
-        self.master        = master
-        self._controller   = controller
-        self._get_src_lang = get_source_lang or (lambda: "en")
-        self._get_tgt_lang = get_target_lang or (lambda: "en")
+    def leaveEvent(self, event):
+        self.setStyleSheet(self._style_template.format(fg=Theme.FG))
+        self.left.emit()
+        super().leaveEvent(event)
 
-        self.queue: Queue = Queue()
-        self._screen_w = master.winfo_screenwidth()
+    def mousePressEvent(self, event):
+        self.clicked.emit(self.word_obj)
+        super().mousePressEvent(event)
 
-        # ── main overlay window ──────────────────────────────────────
-        self.win = tk.Toplevel(master)
-        self.win.withdraw()
-        self.win.overrideredirect(True)
-        self.win.attributes("-topmost", True)
-        self.win.attributes("-alpha", 0.95)
-        self.win.configure(bg=self.BG)
 
-        self._word_labels: list[tk.Label] = []
-        self._card: tk.Toplevel | None   = None
-        self._card_after_id: str | None  = None
-        self._pinned_card: tk.Toplevel | None = None
-        self._words: list = []
+class HoverCard(QFrame):
+    """Small popup shown under a word on hover — quick definition preview."""
 
-        # Translation line (dual subtitle)
-        self._translation_label: tk.Label | None = None
-        self._translation_text: str = ""
-        self._translation_visible: bool = False
+    definition_ready = Signal(object)  # word, emitted from a background thread
 
-        # Pinned word (Word model holds definition data)
-        self._pinned_word = None
-        self._anki_btn: tk.Button | None = None
+    def __init__(self, controller, get_src_lang, get_tgt_lang):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+                          | Qt.WindowType.WindowStaysOnTopHint)
+        self._controller = controller
+        self._get_src_lang = get_src_lang
+        self._get_tgt_lang = get_tgt_lang
+        self.setStyleSheet(
+            f"QFrame {{ background: {Theme.CARD_BG}; border: 1px solid {Theme.BORDER}; "
+            f"border-radius: 10px; }}"
+        )
+        self.definition_ready.connect(self._apply_definition)
 
-        self._measure_label = tk.Label(self.win, font=self.FONT_WORD)
-        self._measure_label.place(x=-9999, y=-9999)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(4)
 
-        self.win.bind("<Escape>", lambda e: self.hide())
-        self.master.after(30, self._drain_queue)
+        self._title = QLabel()
+        self._title.setStyleSheet(f"color: {Theme.CARD_TITLE_FG}; {Theme.font_css(Theme.FONT_CARD_TITLE)}")
+        layout.addWidget(self._title)
 
-    # ── public ───────────────────────────────────────────────────────
-    def show(self):
-        self.win.deiconify()
-        self._reposition()
+        self._source = QLabel()
+        self._source.setStyleSheet(f"color: {Theme.CARD_GRAM_FG}; {Theme.font_css(Theme.FONT_CARD_META)}")
+        layout.addWidget(self._source)
 
-    def hide(self):
-        self._hide_card()
-        self.win.withdraw()
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"background: {Theme.BORDER};")
+        layout.addWidget(divider)
 
-    def clear(self):
-        self._hide_card(immediate=True)
-        self._words.clear()
-        self._translation_text = ""
-        self._rebuild_labels()
+        self._definition = QLabel()
+        self._definition.setStyleSheet(f"color: {Theme.CARD_DEF_FG}; {Theme.font_css(Theme.FONT_CARD_BODY)}")
+        self._definition.setWordWrap(True)
+        self._definition.setMaximumWidth(320)
+        layout.addWidget(self._definition)
 
-    def set_translation_visible(self, visible: bool):
-        self._translation_visible = visible
-        if not visible:
-            self._translation_text = ""
-            if self._translation_label:
-                self._translation_label.destroy()
-                self._translation_label = None
-            self._rebuild_labels()
+        self._grammar = QLabel()
+        self._grammar.setStyleSheet(f"color: {Theme.CARD_GRAM_FG}; {Theme.font_css(Theme.FONT_CARD_POS)}")
+        layout.addWidget(self._grammar)
 
-    # ── queue polling ────────────────────────────────────────────────
-    def _drain_queue(self):
-        rebuild = False
-        try:
-            while True:
-                item = self.queue.get_nowait()
-                if isinstance(item, tuple):
-                    if item[0] == "WORDS":
-                        self._words = item[1]
-                        rebuild = True
-                    elif item[0] == "TRANSLATION":
-                        self._translation_text = item[1]
-                        rebuild = True
-        except Empty:
-            pass
-        if rebuild:
-            self._rebuild_labels()
-        self.master.after(30, self._drain_queue)
+        self._error = QLabel()
+        self._error.setStyleSheet(f"color: {Theme.CARD_ERR_FG}; {Theme.font_css(Theme.FONT_CARD_META)}")
+        layout.addWidget(self._error)
 
-    # ── measuring ────────────────────────────────────────────────────
-    def _measure_word(self, text: str) -> int:
-        self._measure_label.config(text=text)
-        self._measure_label.update_idletasks()
-        return self._measure_label.winfo_width()
+        self._current_word = None
 
-    # ── flow layout + label rebuild ──────────────────────────────────
-    def _rebuild_labels(self):
-        for lbl in self._word_labels:
-            lbl.destroy()
-        self._word_labels.clear()
-        if self._translation_label:
-            self._translation_label.destroy()
-            self._translation_label = None
+    def show_for(self, word_obj, anchor_global_pos: QPoint):
+        self._current_word = word_obj
+        self._title.setText(word_obj.text)
+        src_name = LANG_NAMES.get(self._get_src_lang(), self._get_src_lang())
+        self._source.setText(f"from {src_name}")
+        self._definition.setText("Loading…")
+        self._grammar.setText("")
+        self._error.setText("")
 
-        if not self._words:
-            self.win.geometry(f"{self._screen_w}x0+0+0")
-            return
-
-        max_line_width = self._screen_w - 2 * self.MARGIN_X
-        word_pad       = self.WORD_PAD_X * 2
-
-        lines: list[list[tuple]] = []
-        current_line: list[tuple] = []
-        current_x = 0
-
-        for word_obj in self._words:
-            w_px = self._measure_word(word_obj.text) + word_pad
-            if current_line and (current_x + w_px) > max_line_width:
-                lines.append(current_line)
-                current_line = []
-                current_x    = 0
-
-            current_line.append((word_obj, w_px))
-            current_x += w_px
-
-        if current_line:
-            lines.append(current_line)
-
-        num_lines = len(lines)
-        words_bottom = num_lines * self.LINE_HEIGHT + self.MARGIN_Y
-
-        for line_idx, line in enumerate(lines):
-            line_total_w = sum(w for _, w in line)
-            x = (self._screen_w - line_total_w) // 2
-            y = self.MARGIN_Y + line_idx * self.LINE_HEIGHT
-
-            for word_obj, w_px in line:
-                lbl = tk.Label(
-                    self.win,
-                    text=word_obj.text,
-                    font=self.FONT_WORD,
-                    fg=self.FG,
-                    bg=self.BG,
-                    padx=self.WORD_PAD_X,
-                    pady=2,
-                    cursor="hand2",
-                )
-                lbl.place(x=x, y=y, width=w_px, height=self.LINE_HEIGHT)
-                lbl.bind("<Enter>",   lambda e, wo=word_obj, lb=lbl: self._on_word_enter(e, wo, lb))
-                lbl.bind("<Leave>",   lambda e: self._on_word_leave(e))
-                lbl.bind("<Button-1>", lambda e, wo=word_obj: self._on_word_click(wo))
-                self._word_labels.append(lbl)
-                x += w_px
-
-        # ── translation line (dual subtitle) ──────────────────────
-        if self._translation_visible and self._translation_text:
-            trans_y = words_bottom + self.TRANSLATION_PAD_Y
-            self._translation_label = tk.Label(
-                self.win,
-                text=self._translation_text,
-                font=self.FONT_TRANSLATION,
-                fg=self.TRANSLATION_FG,
-                bg=self.BG,
-                anchor="center",
-                wraplength=self._screen_w - 2 * self.MARGIN_X,
-            )
-            self._translation_label.update_idletasks()
-            trans_h = self._translation_label.winfo_reqheight()
-            trans_w = self._translation_label.winfo_reqwidth()
-            trans_x = (self._screen_w - trans_w) // 2
-            self._translation_label.place(x=trans_x, y=trans_y, height=trans_h)
-            overlay_h = trans_y + trans_h + self.MARGIN_Y
-        else:
-            overlay_h = words_bottom + self.MARGIN_Y
-
-        self.win.geometry(f"{self._screen_w}x{overlay_h}+0+0")
-
-    def _reposition(self):
-        if self._words:
-            self._rebuild_labels()
-        else:
-            self.win.geometry(f"{self._screen_w}x0+0+0")
-
-    # ── hover ────────────────────────────────────────────────────────
-    def _on_word_enter(self, event, word_obj, label: tk.Label):
-        label.config(fg=self.HOVER_FG)
-        if self._card_after_id:
-            self.master.after_cancel(self._card_after_id)
-            self._card_after_id = None
-
-        self._show_hover_card(word_obj, label)
+        self.adjustSize()
+        x, y = anchor_global_pos.x(), anchor_global_pos.y()
+        screen_w = QApplication.primaryScreen().geometry().width()
+        if x + self.width() > screen_w:
+            x = screen_w - self.width() - 10
+        self.move(x, y)
+        self.show()
 
         self._controller.fetch_hover_definition(
             word_obj, self._get_src_lang(), self._get_tgt_lang(),
-            on_ready=lambda w: self.master.after(0, self._apply_hover_definition, w),
+            on_ready=self.definition_ready.emit,
         )
 
-    def _on_word_leave(self, event):
-        for lbl in self._word_labels:
-            lbl.config(fg=self.FG)
-        self._card_after_id = self.master.after(120, self._hide_card)
-
-    # ── hover card (QUICK PREVIEW) ───────────────────────────────────
-    def _show_hover_card(self, word_obj, label: tk.Label):
-        self._hide_card(immediate=True)
-
-        card = tk.Toplevel(self.master)
-        card.overrideredirect(True)
-        card.attributes("-topmost", True)
-        card.attributes("-alpha", 0.97)
-        card.configure(bg=self.CARD_BORDER)
-
-        inner = tk.Frame(card, bg=self.CARD_BG, padx=16, pady=12)
-        inner.pack(padx=2, pady=2)
-
-        # Title
-        tk.Label(
-            inner, 
-            text=word_obj.text, 
-            font=self.FONT_CARD_TITLE,
-            fg=self.CARD_TITLE_FG, 
-            bg=self.CARD_BG
-        ).pack(anchor="w")
-
-        # Source language
-        src_name = LANG_NAMES.get(self._get_src_lang(), self._get_src_lang())
-        tk.Label(
-            inner, 
-            text=f"from {src_name}",
-            font=self.FONT_CARD_META, 
-            fg=self.CARD_GRAM_FG, 
-            bg=self.CARD_BG
-        ).pack(anchor="w", pady=(0, 6))
-
-        tk.Frame(inner, bg=self.CARD_BORDER, height=1).pack(fill="x", pady=(0, 8))
-
-        self._card_def_label = tk.Label(
-            inner, text="Loading…", font=self.FONT_CARD_BODY,
-            fg=self.CARD_DEF_FG, bg=self.CARD_BG, justify="left", wraplength=320
-        )
-        self._card_def_label.pack(anchor="w")
-
-        self._card_gram_label = tk.Label(
-            inner, text="", font=self.FONT_CARD_POS,
-            fg=self.CARD_GRAM_FG, bg=self.CARD_BG, justify="left"
-        )
-        self._card_gram_label.pack(anchor="w", pady=(6, 0))
-
-        self._card_err_label = tk.Label(
-            inner, text="", font=self.FONT_CARD_META,
-            fg=self.CARD_ERR_FG, bg=self.CARD_BG, justify="left"
-        )
-        self._card_err_label.pack(anchor="w", pady=(4, 0))
-
-        # Position below word
-        label.update_idletasks()
-        x = label.winfo_rootx()
-        y = label.winfo_rooty() + label.winfo_height() + 8
-        
-        card.update_idletasks()
-        card_w = card.winfo_reqwidth()
-        screen_w = self.master.winfo_screenwidth()
-        if x + card_w > screen_w:
-            x = screen_w - card_w - 10
-        
-        card.geometry(f"+{x}+{y}")
-
-        self._card = card
-
-        def cancel_hide(e):
-            if self._card_after_id:
-                self.master.after_cancel(self._card_after_id)
-                self._card_after_id = None
-
-        def schedule_hide(e):
-            self._card_after_id = self.master.after(120, self._hide_card)
-
-        card.bind("<Enter>", cancel_hide)
-        card.bind("<Leave>", schedule_hide)
-
-    def _hide_card(self, immediate=False):
-        if self._card_after_id:
-            self.master.after_cancel(self._card_after_id)
-            self._card_after_id = None
-        if self._card is not None:
-            try:
-                self._card.destroy()
-            except tk.TclError:
-                pass
-            self._card = None
-
-    # ── hover apply ─────────────────────────────────────────────────
-    def _apply_hover_definition(self, word):
-        if self._card is None:
+    def _apply_definition(self, word):
+        if word is not self._current_word or not self.isVisible():
             return
+        try:
+            result = word.simple_result or {}
+            if result.get("error"):
+                self._definition.setText("")
+                self._grammar.setText("")
+                self._error.setText(f"⚠️ {result['error']}")
+                return
+            self._definition.setText(word.definition or "No definition found.")
+            self._grammar.setText(f"• {word.grammar}" if word.grammar else "")
+            self._error.setText("")
+            self.adjustSize()
+        except Exception:
+            logger.exception("Failed to render hover definition for word=%r", word.text)
+            self._error.setText("⚠️ Could not display definition")
 
-        result = word.simple_result or {}
 
-        if result.get("error"):
-            self._card_def_label.config(text="")
-            self._card_gram_label.config(text="")
-            self._card_err_label.config(text=f"⚠️ {result['error']}")
-            return
+class DetailDialog(QDialog):
+    """Pinned full-detail card — pronunciation, senses, forms, Anki export."""
 
-        self._card_def_label.config(text=word.definition or "No definition found.")
-        if word.grammar:
-            self._card_gram_label.config(text=f"• {word.grammar}")
-        else:
-            self._card_gram_label.config(text="")
-        self._card_err_label.config(text="")
-        self._card.update_idletasks()
+    details_ready = Signal(object)  # word, emitted from a background thread
 
-    # ── click (FULL DETAILS) ─────────────────────────────────────────
-    def _on_word_click(self, word_obj):
-        self._show_pinned_card(word_obj)
+    def __init__(self, controller, word_obj, src_lang, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Word Details")
+        self.setStyleSheet(f"QDialog {{ background: {Theme.CARD_BG}; }}")
+        self.resize(520, 640)
+
+        self._controller = controller
+        self._word = word_obj
+        self._src_lang = src_lang
+        self.details_ready.connect(self._apply_details)
+
+        outer = QVBoxLayout(self)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        outer.addWidget(scroll)
+
+        self._content = QWidget()
+        self._content.setStyleSheet("background: transparent;")
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(20, 16, 20, 16)
+        self._content_layout.setSpacing(4)
+        scroll.setWidget(self._content)
+
+        title = QLabel(word_obj.text)
+        title.setStyleSheet(f"color: {Theme.CARD_TITLE_FG}; {Theme.font_css(Theme.FONT_CARD_TITLE)}")
+        self._content_layout.addWidget(title)
+
+        src_name = LANG_NAMES.get(src_lang, src_lang)
+        source = QLabel(f"from {src_name}")
+        source.setStyleSheet(
+            f"color: {Theme.CARD_GRAM_FG}; margin-bottom: 8px; {Theme.font_css(Theme.FONT_CARD_META)}"
+        )
+        self._content_layout.addWidget(source)
+
+        self._body = QVBoxLayout()
+        self._body.setSpacing(4)
+        self._content_layout.addLayout(self._body)
+        self._loading_label = QLabel("Loading…")
+        self._loading_label.setStyleSheet(f"color: {Theme.CARD_DEF_FG};")
+        self._body.addWidget(self._loading_label)
+        self._content_layout.addStretch(1)
+
+        btn_row = QHBoxLayout()
+        self._anki_btn = QPushButton("+ Anki")
+        self._anki_btn.setProperty("variant", "success")
+        self._anki_btn.setEnabled(False)
+        self._anki_btn.clicked.connect(self._save_to_anki)
+        btn_row.addWidget(self._anki_btn)
+        btn_row.addStretch(1)
+        close_btn = QPushButton("✕ Close")
+        close_btn.clicked.connect(self.close)
+        btn_row.addWidget(close_btn)
+        outer.addLayout(btn_row)
 
         self._controller.fetch_full_definition(
-            word_obj, self._get_src_lang(), self._get_tgt_lang(),
-            on_ready=lambda w: self.master.after(0, self._apply_pinned_details, w),
+            word_obj, src_lang, "en",
+            on_ready=self.details_ready.emit,
         )
 
-    # ── pinned detail card (IMPROVED) ────────────────────────────────
-    def _show_pinned_card(self, word_obj):
-        if self._pinned_card is not None:
-            try:
-                self._pinned_card.destroy()
-            except tk.TclError:
-                pass
-            self._pinned_card = None
+    def _clear_body(self):
+        while self._body.count():
+            item = self._body.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
-        card = tk.Toplevel(self.master)
-        card.title("Word Details")
-        card.attributes("-topmost", True)
-        card.configure(bg=self.CARD_BORDER)
-        card.protocol("WM_DELETE_WINDOW", lambda: self._close_pinned_card())
-        card.resizable(False, False)
-
-        # Main container with scrolling
-        canvas = tk.Canvas(card, bg=self.CARD_BG, highlightthickness=0, width=480, height=600)
-        scrollbar = tk.Scrollbar(card, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas, bg=self.CARD_BG)
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    def _add_section_header(self, text: str):
+        lbl = QLabel(text.upper())
+        lbl.setStyleSheet(
+            f"color: {Theme.CARD_SECTION_FG}; margin-top: 10px; {Theme.font_css(('Segoe UI', 10, 'bold'))}"
         )
+        self._body.addWidget(lbl)
 
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+    def _add_body_label(self, text: str, color: str, font_spec=Theme.FONT_CARD_BODY, wrap=True):
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color: {color}; {Theme.font_css(font_spec)}")
+        lbl.setWordWrap(wrap)
+        self._body.addWidget(lbl)
+        return lbl
 
-        canvas.pack(side="left", fill="both", expand=True, padx=2, pady=2)
-        scrollbar.pack(side="right", fill="y")
+    def _apply_details(self, word):
+        try:
+            self._render_details(word)
+        except Exception:
+            logger.exception("Failed to render word details for word=%r", word.text)
+            self._clear_body()
+            self._add_body_label("⚠️ Could not display details for this word", Theme.CARD_ERR_FG)
 
-        inner = tk.Frame(scrollable_frame, bg=self.CARD_BG, padx=20, pady=16)
-        inner.pack(fill="both", expand=True)
-
-        # Word title (larger, more prominent)
-        tk.Label(
-            inner, 
-            text=word_obj.text, 
-            font=self.FONT_CARD_TITLE,
-            fg=self.CARD_TITLE_FG, 
-            bg=self.CARD_BG
-        ).pack(anchor="w")
-
-        # Source language
-        src_name = LANG_NAMES.get(self._get_src_lang(), self._get_src_lang())
-        tk.Label(
-            inner, 
-            text=f"from {src_name}",
-            font=self.FONT_CARD_META, 
-            fg=self.CARD_GRAM_FG, 
-            bg=self.CARD_BG
-        ).pack(anchor="w", pady=(0, 12))
-
-        tk.Frame(inner, bg=self.CARD_BORDER, height=2).pack(fill="x", pady=(0, 12))
-
-        # Content area (will be filled by _apply_pinned_details)
-        content_frame = tk.Frame(inner, bg=self.CARD_BG)
-        content_frame.pack(fill="both", expand=True)
-
-        self._pinned_content_frame = content_frame
-        self._pinned_word = word_obj
-
-        self._pinned_loading_label = tk.Label(
-            content_frame,
-            text="Loading…",
-            font=self.FONT_CARD_BODY,
-            fg=self.CARD_DEF_FG,
-            bg=self.CARD_BG
-        )
-        self._pinned_loading_label.pack(anchor="w")
-
-        # Buttons row
-        btn_frame = tk.Frame(inner, bg=self.CARD_BG)
-        btn_frame.pack(fill="x", pady=(16, 0))
-
-        self._anki_btn = tk.Button(
-            btn_frame,
-            text="+ Anki",
-            command=self._save_to_anki,
-            bg="#2d4a2d",
-            fg=self.CARD_SYN_FG,
-            font=self.FONT_CARD_BODY,
-            relief="flat",
-            padx=20,
-            pady=6,
-            cursor="hand2",
-            state="disabled",
-        )
-        self._anki_btn.pack(side="left")
-
-        close_btn = tk.Button(
-            btn_frame,
-            text="✕ Close",
-            command=self._close_pinned_card,
-            bg=self.CARD_BORDER,
-            fg=self.CARD_DEF_FG,
-            font=self.FONT_CARD_BODY,
-            relief="flat",
-            padx=20,
-            pady=6,
-            cursor="hand2"
-        )
-        close_btn.pack(side="right")
-
-        self._pinned_card = card
-        card.update_idletasks()
-        
-        # Center on screen
-        screen_w = self.master.winfo_screenwidth()
-        screen_h = self.master.winfo_screenheight()
-        card_w = 520
-        card_h = min(650, screen_h - 100)
-        x = (screen_w - card_w) // 2
-        y = (screen_h - card_h) // 2
-        card.geometry(f"{card_w}x{card_h}+{x}+{y}")
-
-    def _close_pinned_card(self):
-        if self._pinned_card is not None:
-            try:
-                self._pinned_card.destroy()
-            except tk.TclError:
-                pass
-            self._pinned_card = None
-
-    # ── pinned apply (COMPLETE INFO) ─────────────────────────────────
-    def _apply_pinned_details(self, word):
-        if self._pinned_card is None:
-            return
-
+    def _render_details(self, word):
+        self._clear_body()
         simple_result = word.simple_result or {}
         detail_result = word.detail_result or {}
 
-        # Clear loading message
-        for widget in self._pinned_content_frame.winfo_children():
-            widget.destroy()
-
-        content = self._pinned_content_frame
-
-        # Handle errors
         if simple_result.get("error") and detail_result.get("error"):
-            tk.Label(
-                content,
-                text=f"⚠️ Error: {simple_result['error']}",
-                font=self.FONT_CARD_BODY,
-                fg=self.CARD_ERR_FG,
-                bg=self.CARD_BG
-            ).pack(anchor="w")
+            self._add_body_label(f"⚠️ Error: {simple_result['error']}", Theme.CARD_ERR_FG)
             return
 
         d = word.details
 
-        # PART OF SPEECH (prominent)
         pos = d.get("partOfSpeech", word.grammar)
         if pos:
-            tk.Label(
-                content, 
-                text=f"• {pos}", 
-                font=self.FONT_CARD_POS,
-                fg=self.CARD_GRAM_FG, 
-                bg=self.CARD_BG
-            ).pack(anchor="w", pady=(0, 12))
+            self._add_body_label(f"• {pos}", Theme.CARD_GRAM_FG, Theme.FONT_CARD_POS)
 
-        # PRONUNCIATION (from detail data)
-        prons = pick_pronunciations(d.get("pronunciations", []), self._get_src_lang())
+        prons = pick_pronunciations(d.get("pronunciations", []), self._src_lang)
         if prons:
-            self._add_section_header(content, "Pronunciation")
+            self._add_section_header("Pronunciation")
             for p in prons:
-                txt  = p.get("text", "")
                 tags = p.get("tags", [])
                 tag_str = f" ({', '.join(tags)})" if tags else ""
-                tk.Label(
-                    content, 
-                    text=f"  {txt}{tag_str}", 
-                    font=self.FONT_CARD_PRON,
-                    fg=self.CARD_PRON_FG, 
-                    bg=self.CARD_BG
-                ).pack(anchor="w", pady=(2, 0))
-            self._add_spacer(content)
+                self._add_body_label(f"  {p.get('text', '')}{tag_str}", Theme.CARD_PRON_FG, Theme.FONT_CARD_PRON)
 
-        # MEANINGS (include simple definition at top)
-        self._add_section_header(content, "Meanings")
-        
-        # First show the simple/hover definition (always clear and concise)
+        self._add_section_header("Meanings")
         simple_def = word.definition
         if simple_def and simple_def != "No definition found.":
-            tk.Label(
-                content, 
-                text=f"• {simple_def}", 
-                font=self.FONT_CARD_BODY,
-                fg=self.CARD_DEF_FG, 
-                bg=self.CARD_BG,
-                wraplength=440,
-                justify="left"
-            ).pack(anchor="w", pady=(4, 8))
+            self._add_body_label(f"• {simple_def}", Theme.CARD_DEF_FG)
 
-        # Then show detailed senses (filtered)
         senses = d.get("senses", [])
         if senses:
             filtered = [s for s in senses if not (set(s.get("tags", [])) & SKIP_TAGS)]
             real = [s for s in filtered if not is_inflection_definition(s.get("definition", ""))]
             infl = [s for s in filtered if is_inflection_definition(s.get("definition", ""))]
-            
-            chosen = (real or infl)[:self.MAX_SENSES]
-            
+            chosen = (real or infl)[:MAX_SENSES]
+
             for i, s in enumerate(chosen, start=1):
                 defi = s.get("definition", "")
-                tags = s.get("tags", [])
-                
-                # Skip if it's the same as simple definition
                 if defi == simple_def:
                     continue
-                
-                # Definition number + text
-                def_frame = tk.Frame(content, bg=self.CARD_BG)
-                def_frame.pack(anchor="w", fill="x", pady=(4, 2))
-                
-                tk.Label(
-                    def_frame, 
-                    text=f"{i}.", 
-                    font=self.FONT_CARD_BODY,
-                    fg=self.CARD_TITLE_FG, 
-                    bg=self.CARD_BG
-                ).pack(side="left", anchor="nw")
-                
+                tags = s.get("tags", [])
                 tag_str = f" [{', '.join(tags)}]" if tags else ""
-                tk.Label(
-                    def_frame, 
-                    text=f" {defi}{tag_str}", 
-                    font=self.FONT_CARD_BODY,
-                    fg=self.CARD_DEF_FG, 
-                    bg=self.CARD_BG,
-                    wraplength=400,
-                    justify="left"
-                ).pack(side="left", anchor="nw", fill="x", expand=True)
+                self._add_body_label(f"{i}. {defi}{tag_str}", Theme.CARD_DEF_FG)
 
-                # Examples
                 examples = s.get("examples", [])
                 if examples:
-                    tk.Label(
-                        content, 
-                        text=f"    e.g. {examples[0]}", 
-                        font=self.FONT_CARD_EXAMPLE,
-                        fg=self.CARD_EXAMPLE_FG, 
-                        bg=self.CARD_BG,
-                        wraplength=420,
-                        justify="left"
-                    ).pack(anchor="w", pady=(2, 0))
+                    self._add_body_label(f"    e.g. {examples[0]}", Theme.CARD_EXAMPLE_FG, Theme.FONT_CARD_EXAMPLE)
 
-                # Synonyms
                 synonyms = s.get("synonyms", [])
                 if synonyms:
-                    tk.Label(
-                        content, 
-                        text=f"    ≈ {', '.join(synonyms[:6])}", 
-                        font=self.FONT_CARD_META,
-                        fg=self.CARD_SYN_FG, 
-                        bg=self.CARD_BG,
-                        wraplength=420,
-                        justify="left"
-                    ).pack(anchor="w", pady=(2, 0))
+                    self._add_body_label(f"    ≈ {', '.join(synonyms[:6])}", Theme.CARD_SYN_FG, Theme.FONT_CARD_META)
 
-                # Antonyms
                 antonyms = s.get("antonyms", [])
                 if antonyms:
-                    tk.Label(
-                        content, 
-                        text=f"    ≠ {', '.join(antonyms[:6])}", 
-                        font=self.FONT_CARD_META,
-                        fg=self.CARD_ANT_FG, 
-                        bg=self.CARD_BG,
-                        wraplength=420,
-                        justify="left"
-                    ).pack(anchor="w", pady=(2, 6))
+                    self._add_body_label(f"    ≠ {', '.join(antonyms[:6])}", Theme.CARD_ANT_FG, Theme.FONT_CARD_META)
 
-        self._add_spacer(content)
-
-        # KEY FORMS
         forms = pick_forms(d.get("forms", []))
         if forms:
-            self._add_section_header(content, "Key Forms")
+            self._add_section_header("Key Forms")
             for f in forms:
-                w = f.get("word", "")
                 tags = f.get("tags", [])
                 tag_str = f" — {', '.join(tags)}" if tags else ""
-                tk.Label(
-                    content,
-                    text=f"  • {w}{tag_str}",
-                    font=self.FONT_CARD_BODY,
-                    fg=self.CARD_DEF_FG,
-                    bg=self.CARD_BG
-                ).pack(anchor="w", pady=(2, 0))
+                self._add_body_label(f"  • {f.get('word', '')}{tag_str}", Theme.CARD_DEF_FG)
 
-        # Enable Anki button now that data is loaded
-        if self._anki_btn:
-            self._anki_btn.config(state="normal")
+        self._anki_btn.setEnabled(True)
 
-        self._pinned_card.update_idletasks()
-
-    def _add_section_header(self, parent, text):
-        """Add a section header with visual separator."""
-        tk.Label(
-            parent, 
-            text=text.upper(), 
-            font=("Segoe UI", 10, "bold"),
-            fg=self.CARD_SECTION_FG, 
-            bg=self.CARD_BG
-        ).pack(anchor="w", pady=(12, 4))
-
-    def _add_spacer(self, parent, height=8):
-        """Add vertical spacing."""
-        tk.Frame(parent, bg=self.CARD_BG, height=height).pack(fill="x")
-
-    # ── Anki export ───────────────────────────────────────────────────
     def _save_to_anki(self):
-        if not self._pinned_word or not self._pinned_word.is_definition_loaded:
+        if not self._word.is_definition_loaded:
             return
-        self._show_deck_picker()
-
-    def _show_deck_picker(self):
         from views.deck_picker import DeckPickerDialog
+        dlg = DeckPickerDialog(self._controller, self._word, self._src_lang, parent=self)
+        dlg.saved.connect(lambda: self._anki_btn.setText("Saved"))
+        dlg.saved.connect(lambda: self._anki_btn.setEnabled(False))
+        dlg.exec()
 
-        def on_saved():
-            if self._anki_btn:
-                self._anki_btn.config(text="Saved", state="disabled", bg=self.CARD_BORDER)
 
-        DeckPickerDialog(
-            master=self.master,
-            controller=self._controller,
-            word=self._pinned_word,
-            src_lang=self._get_src_lang(),
-            on_saved=on_saved,
-            anchor_window=self._pinned_card,
+class SubtitleOverlay(QWidget):
+    """Borderless, always-on-top bar showing the live subtitle + word cards."""
+
+    _words_signal = Signal(list)
+    _translation_signal = Signal(str)
+
+    MARGIN_X = 24
+    MARGIN_Y = 10
+
+    def __init__(self, controller, get_source_lang=None, get_target_lang=None):
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool,
+        )
+        self._controller = controller
+        self._get_src_lang = get_source_lang or (lambda: "en")
+        self._get_tgt_lang = get_target_lang or (lambda: "en")
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowOpacity(0.95)
+
+        self._words_signal.connect(self._apply_words)
+        self._translation_signal.connect(self._apply_translation)
+
+        self._background = QFrame(self)
+        self._background.setStyleSheet(
+            f"background: {Theme.rgba(Theme.BG, 235)}; border-radius: 12px;"
         )
 
+        self._flow_container = QWidget(self._background)
+        self._lines_layout = QVBoxLayout(self._flow_container)
+        self._lines_layout.setContentsMargins(0, 0, 0, 0)
+        self._lines_layout.setSpacing(2)
 
+        self._translation_label = QLabel(self._background)
+        self._translation_label.setStyleSheet(
+            f"color: {Theme.TRANSLATION_FG}; background: transparent; {Theme.font_css(Theme.FONT_TRANSLATION)}"
+        )
+        self._translation_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._translation_label.setWordWrap(True)
+        self._translation_label.hide()
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._background)
+
+        inner = QVBoxLayout(self._background)
+        inner.setContentsMargins(self.MARGIN_X, self.MARGIN_Y, self.MARGIN_X, self.MARGIN_Y)
+        inner.addWidget(self._flow_container)
+        inner.addWidget(self._translation_label)
+
+        self._hover_card = HoverCard(controller, self._get_src_lang, self._get_tgt_lang)
+        self._hide_hover_timer = QTimer(self)
+        self._hide_hover_timer.setSingleShot(True)
+        self._hide_hover_timer.timeout.connect(self._hover_card.hide)
+
+        self._words: list = []
+        self._translation_text = ""
+        self._translation_visible = False
+
+        self._reposition()
+
+    # ── public API (thread-safe) ──────────────────────────────────────
+    def push_words(self, words: list):
+        self._words_signal.emit(words)
+
+    def push_translation(self, text: str):
+        self._translation_signal.emit(text)
+
+    def clear(self):
+        self._words_signal.emit([])
+        self._translation_signal.emit("")
+
+    def set_translation_visible(self, visible: bool):
+        self._translation_visible = visible
+        self._translation_label.setVisible(visible and bool(self._translation_text))
+        self._reposition()
+
+    # ── slots (main thread only) ──────────────────────────────────────
+    def _apply_words(self, words: list):
+        self._words = words
+        self._rebuild_word_labels()
+        self._reposition()
+
+    def _apply_translation(self, text: str):
+        self._translation_text = text
+        self._translation_label.setText(text)
+        self._translation_label.setVisible(self._translation_visible and bool(text))
+        self._reposition()
+
+    def _rebuild_word_labels(self):
+        while self._lines_layout.count():
+            item = self._lines_layout.takeAt(0)
+            row = item.layout()
+            if row is not None:
+                while row.count():
+                    sub_item = row.takeAt(0)
+                    if sub_item.widget():
+                        sub_item.widget().deleteLater()
+                row.deleteLater()
+            elif item.widget():
+                item.widget().deleteLater()
+
+        if not self._words:
+            return
+
+        screen = QApplication.primaryScreen().geometry()
+        max_line_width = int(screen.width() * 0.8) - 2 * self.MARGIN_X
+        metrics = QFontMetrics(WORD_FONT)
+        word_pad = 12  # matches WordLabel's 6px horizontal padding on each side
+
+        lines: list[list] = []
+        current_line: list = []
+        current_width = 0
+        for word_obj in self._words:
+            w_px = metrics.horizontalAdvance(word_obj.text) + word_pad
+            if current_line and current_width + w_px > max_line_width:
+                lines.append(current_line)
+                current_line = []
+                current_width = 0
+            current_line.append(word_obj)
+            current_width += w_px
+        if current_line:
+            lines.append(current_line)
+
+        for line_words in lines:
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            row.addStretch(1)
+            for word_obj in line_words:
+                lbl = WordLabel(word_obj)
+                lbl.hovered.connect(self._on_word_hover)
+                lbl.left.connect(self._on_word_leave)
+                lbl.clicked.connect(self._on_word_click)
+                row.addWidget(lbl)
+            row.addStretch(1)
+            self._lines_layout.addLayout(row)
+
+    def _reposition(self):
+        screen = QApplication.primaryScreen().geometry()
+        max_width = int(screen.width() * 0.8)
+        self._translation_label.setMaximumWidth(max_width - 2 * self.MARGIN_X)
+
+        self.setMaximumWidth(max_width)
+        self.adjustSize()
+        x = screen.x() + (screen.width() - self.width()) // 2
+        y = screen.y() + 60  # fixed distance from the top of the screen
+        self.move(x, y)
+
+    # ── hover / click handlers ─────────────────────────────────────────
+    def _on_word_hover(self, word_obj, label: WordLabel):
+        self._hide_hover_timer.stop()
+        pos = label.mapToGlobal(QPoint(0, label.height() + 8))
+        self._hover_card.show_for(word_obj, pos)
+
+    def _on_word_leave(self):
+        self._hide_hover_timer.start(150)
+
+    def _on_word_click(self, word_obj):
+        dlg = DetailDialog(self._controller, word_obj, self._get_src_lang(), parent=self)
+        dlg.exec()

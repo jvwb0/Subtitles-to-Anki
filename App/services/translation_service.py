@@ -7,8 +7,10 @@ Debounces rapid calls so Google Translate is not spammed on every word.
 import threading
 from deep_translator import GoogleTranslator
 
+from interfaces.translation_provider import ITranslationProvider
 
-class TranslationService:
+
+class TranslationService(ITranslationProvider):
     """Translate sentence text asynchronously with debouncing."""
 
     DEBOUNCE_SEC = 0.6

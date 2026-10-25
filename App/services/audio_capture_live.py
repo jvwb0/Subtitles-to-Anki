@@ -2,8 +2,10 @@ import time
 import wave
 import pyaudiowpatch
 
+from interfaces.audio_recorder import IAudioRecorder
 
-class AudioCaptureLive:
+
+class AudioCaptureLive(IAudioRecorder):
     """
     Live recording (loopback/mic) with capped in-memory buffer.
     
@@ -40,7 +42,7 @@ class AudioCaptureLive:
             input_device_index=self.device
         )
 
-    def readChunk(self) -> bytes:
+    def read_chunk(self) -> bytes:
         """
         Read one chunk from the stream.
         
@@ -59,7 +61,7 @@ class AudioCaptureLive:
             # Expected during shutdown - stream.stop_stream() causes read() to fail
             return b""
 
-    def getRecentChunks(self, seconds: float) -> list[bytes]:
+    def get_recent_chunks(self, seconds: float) -> list[bytes]:
         """Returns raw PCM chunks (bytes) for the last N seconds."""
         if seconds <= 0:
             return []

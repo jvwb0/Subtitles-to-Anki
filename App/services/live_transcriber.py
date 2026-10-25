@@ -10,7 +10,7 @@ Features:
 """
 
 from typing import List, Tuple, Optional
-from models.word import Word, WordState
+from models.word import Word, WordState, shift_timestamps
 from services.audio_conversion import AudioConverter
 from utils.text_utils import strip_punct as _strip_punct
 
@@ -65,7 +65,7 @@ class LiveTranscriber:  # KEPT SAME NAME
         self._tail: list[str] = []  # For n-gram dedup
 
     # ── main tick ────────────────────────────────────────────────────
-    def tick(self, windowSec: float = 3.0) -> Tuple[List[Word], List[Tuple[Word, Word]]]:
+    def tick(self, window_sec: float = 3.0) -> Tuple[List[Word], List[Tuple[Word, Word]]]:
         """
         Transcribe recent audio with provisional word support.
         
@@ -74,7 +74,7 @@ class LiveTranscriber:  # KEPT SAME NAME
             new_words: List of newly emitted words
             revisions: List of (old_word, new_word) tuples for words that changed
         """
-        chunks = self.recorder.getRecentChunks(windowSec)
+        chunks = self.recorder.get_recent_chunks(window_sec)
         if not chunks:
             return [], []
 
@@ -89,16 +89,14 @@ class LiveTranscriber:  # KEPT SAME NAME
         # ── 1. Transcribe ────────────────────────────────────────────
         total_chunks = len(self.recorder.frames)
         recorded_sec = (total_chunks * self.recorder.chunk) / self.recorder.rate
-        window_start = max(0.0, recorded_sec - windowSec)
+        window_start = max(0.0, recorded_sec - window_sec)
 
         words = self.whisper.transcribe(audio, self.language, task=self.task)
         if not words:
             return [], []
 
         # Adjust to absolute timestamps
-        for w in words:
-            w.startTime += window_start
-            w.endTime += window_start
+        shift_timestamps(words, window_start)
 
         # ── 2. Strip n-gram prefix (old dedup) ──────────────────────
         words = self._strip_ngram_prefix(words)

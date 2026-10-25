@@ -9,7 +9,7 @@ Benefits:
 """
 
 import numpy as np
-from models.word import Word
+from models.word import Word, shift_timestamps
 from services.audio_conversion import AudioConverter
 from utils.text_utils import strip_punct as _strip_punct
 
@@ -137,7 +137,7 @@ class VadTranscriber:
         if grab_sec <= 0:
             return []
 
-        chunks = self.recorder.getRecentChunks(grab_sec)
+        chunks = self.recorder.get_recent_chunks(grab_sec)
         if not chunks:
             return []
 
@@ -155,9 +155,7 @@ class VadTranscriber:
 
         # Map to absolute timestamps
         audio_start = max(0.0, abs_now - grab_sec)
-        for w in words:
-            w.startTime += audio_start
-            w.endTime += audio_start
+        shift_timestamps(words, audio_start)
 
         # Forced flush: hold back unstable tail
         if forced:

@@ -105,14 +105,27 @@ class Word:
         """Return True if this word was just revised."""
         return self.state == WordState.REVISED
     
+    def mark_revised(self):
+        """Mark word as revised (for visual flash effect)."""
+        self.state = WordState.REVISED
+
     def confirm(self):
         """Mark word as confirmed."""
         if self.state == WordState.PROVISIONAL:
             self.state = WordState.CONFIRMED
-    
-    def mark_revised(self):
-        """Mark word as revised (for visual flash effect)."""
-        self.state = WordState.REVISED
-    
+
     def __repr__(self):
         return f"Word('{self.text}', {self.startTime:.2f}-{self.endTime:.2f}, {self.state})"
+
+
+def shift_timestamps(words: list["Word"], offset_sec: float) -> list["Word"]:
+    """Shift a batch of words (in place) from window-relative to absolute time.
+
+    Whisper returns timestamps relative to the audio clip it was given; the
+    transcribers pass the clip's start offset here to convert to absolute
+    session time.
+    """
+    for w in words:
+        w.startTime += offset_sec
+        w.endTime += offset_sec
+    return words

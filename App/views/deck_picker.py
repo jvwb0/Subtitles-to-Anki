@@ -1,194 +1,174 @@
 # views/deck_picker.py
-"""
-Modal dialog for choosing an Anki deck and saving a note.
-"""
+"""Modal dialog for choosing an Anki deck and saving a note."""
 
-import tkinter as tk
-from tkinter import ttk
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QLineEdit,
+    QPushButton,
+)
 
+from views.theme import Theme
+from utils.app_logger import get_logger
 
-# ── theme tokens (match subtitle_overlay) ─────────────────────────────
-_BG         = "#1a1b26"
-_BORDER     = "#414868"
-_FG         = "#c0caf5"
-_MUTED      = "#9aa5ce"
-_GREEN      = "#9ece6a"
-_BLUE       = "#7aa2f7"
-_RED        = "#f7768e"
-_GREEN_BG   = "#2d4a2d"
-_FONT_BODY  = ("Segoe UI", 11)
-_FONT_META  = ("Segoe UI", 9)
+logger = get_logger(__name__)
 
 
-class DeckPickerDialog:
+class DeckPickerDialog(QDialog):
     """Show a deck picker, create decks, and save an Anki note."""
 
-    def __init__(
-        self,
-        master: tk.Tk,
-        controller,
-        word,
-        src_lang: str,
-        on_saved=None,
-        anchor_window: tk.Toplevel | None = None,
-    ):
-        self._master = master
+    saved = Signal()
+
+    # Background-thread controller callbacks funnel through these signals.
+    _decks_loaded = Signal(bool, list)
+    _deck_created = Signal(dict)
+    _save_finished = Signal(dict)
+
+    def __init__(self, controller, word, src_lang: str, parent=None):
+        super().__init__(parent)
         self._controller = controller
         self._word = word
         self._src_lang = src_lang
-        self._on_saved = on_saved
 
-        self._dialog = dlg = tk.Toplevel(master)
-        dlg.title("Save to Anki")
-        dlg.attributes("-topmost", True)
-        dlg.configure(bg=_BG)
-        dlg.resizable(False, False)
-        dlg.grab_set()
+        self.setWindowTitle("Save to Anki")
+        self.setStyleSheet(f"QDialog {{ background: {Theme.CARD_BG}; }}")
+        self.setFixedWidth(340)
 
-        frame = tk.Frame(dlg, bg=_BG, padx=20, pady=16)
-        frame.pack()
+        self._decks_loaded.connect(self._on_decks_loaded)
+        self._deck_created.connect(self._apply_create_result)
+        self._save_finished.connect(self._apply_save_result)
 
-        tk.Label(frame, text="Choose deck:", font=_FONT_BODY,
-                 fg=_FG, bg=_BG).pack(anchor="w", pady=(0, 8))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(8)
 
-        # ── deck combo ────────────────────────────────────────────────
-        self._combo = ttk.Combobox(frame, values=[], width=30, font=_FONT_BODY)
-        self._combo.set("Loading…")
-        self._combo.config(state="disabled")
-        self._combo.pack(fill="x", pady=(0, 4))
+        layout.addWidget(QLabel("Choose deck:"))
 
-        # ── new-deck row ──────────────────────────────────────────────
-        row = tk.Frame(frame, bg=_BG)
-        row.pack(fill="x", pady=(2, 4))
+        self._combo = QComboBox()
+        self._combo.setEditable(False)
+        self._combo.setEnabled(False)
+        self._combo.addItem("Loading…")
+        layout.addWidget(self._combo)
 
-        self._new_entry = tk.Entry(
-            row, font=_FONT_META, bg=_BORDER, fg=_FG,
-            insertbackground=_FG, relief="flat",
-        )
+        new_deck_row = QHBoxLayout()
+        self._new_entry = QLineEdit()
+        self._new_entry.setPlaceholderText("New deck name")
+        self._new_entry.returnPressed.connect(self._do_create_deck)
+        self._new_entry.hide()
+        new_deck_row.addWidget(self._new_entry)
 
-        self._new_btn = tk.Button(
-            row, text="+ New Deck", command=self._show_new_entry,
-            bg=_BG, fg=_BLUE, font=_FONT_META, relief="flat",
-            cursor="hand2", padx=0, pady=0,
-        )
-        self._new_btn.pack(anchor="w")
+        self._new_btn = QPushButton("+ New Deck")
+        self._new_btn.setFlat(True)
+        self._new_btn.clicked.connect(self._show_new_entry)
+        new_deck_row.addWidget(self._new_btn)
 
-        self._create_btn = tk.Button(
-            row, text="Create", command=self._do_create_deck,
-            bg=_GREEN_BG, fg=_GREEN, font=_FONT_META, relief="flat",
-            padx=8, pady=2, cursor="hand2",
-        )
-        self._new_entry.bind("<Return>", lambda e: self._do_create_deck())
+        self._create_btn = QPushButton("Create")
+        self._create_btn.setProperty("variant", "success")
+        self._create_btn.clicked.connect(self._do_create_deck)
+        self._create_btn.hide()
+        new_deck_row.addWidget(self._create_btn)
+        layout.addLayout(new_deck_row)
 
-        # ── status ────────────────────────────────────────────────────
-        self._status = tk.Label(
-            frame, text="Starting Anki…", font=_FONT_META,
-            fg=_MUTED, bg=_BG,
-        )
-        self._status.pack(anchor="w", pady=(4, 8))
+        self._status = QLabel("Starting Anki…")
+        self._status.setProperty("role", "muted")
+        self._status.setWordWrap(True)
+        layout.addWidget(self._status)
 
-        # ── save / cancel ─────────────────────────────────────────────
-        btn_row = tk.Frame(frame, bg=_BG)
-        btn_row.pack(fill="x")
+        btn_row = QHBoxLayout()
+        self._save_btn = QPushButton("Save")
+        self._save_btn.setProperty("variant", "success")
+        self._save_btn.clicked.connect(self._on_save)
+        btn_row.addWidget(self._save_btn)
+        btn_row.addStretch(1)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
 
-        self._save_btn = tk.Button(
-            btn_row, text="Save", command=self._on_save,
-            bg=_GREEN_BG, fg=_GREEN, font=_FONT_BODY, relief="flat",
-            padx=20, pady=6, cursor="hand2",
-        )
-        self._save_btn.pack(side="left")
-
-        tk.Button(
-            btn_row, text="Cancel", command=dlg.destroy,
-            bg=_BORDER, fg=_FG, font=_FONT_BODY, relief="flat",
-            padx=20, pady=6, cursor="hand2",
-        ).pack(side="right")
-
-        # ── position & launch background connect ──────────────────────
-        self._controller.ensure_anki_ready(
-            on_ready=lambda ok, decks: self._master.after(
-                0, self._on_decks_loaded, ok, decks
-            ),
-        )
-
-        dlg.update_idletasks()
-        if anchor_window:
-            px, py = anchor_window.winfo_x(), anchor_window.winfo_y()
-            pw, ph = anchor_window.winfo_width(), anchor_window.winfo_height()
-            dw, dh = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
-            dlg.geometry(f"+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
+        self._controller.ensure_anki_ready(on_ready=self._decks_loaded.emit)
 
     # ── new-deck helpers ──────────────────────────────────────────────
     def _show_new_entry(self):
-        self._new_btn.pack_forget()
-        self._new_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self._create_btn.pack(side="right")
-        self._new_entry.focus_set()
+        self._new_btn.hide()
+        self._new_entry.show()
+        self._create_btn.show()
+        self._new_entry.setFocus()
 
     def _do_create_deck(self):
-        name = self._new_entry.get().strip()
+        name = self._new_entry.text().strip()
         if not name:
             return
-        self._create_btn.config(state="disabled", text="…")
+        self._create_btn.setEnabled(False)
+        self._create_btn.setText("…")
+        self._controller.create_anki_deck(name, on_ready=self._deck_created.emit)
+        self._pending_deck_name = name
 
-        def on_created(result):
-            self._master.after(0, lambda: self._apply_create_result(result, name))
-
-        self._controller.create_anki_deck(name, on_ready=on_created)
-
-    def _apply_create_result(self, result, name):
-        if result["success"]:
-            vals = list(self._combo["values"]) + [name]
-            self._combo["values"] = vals
-            self._combo.set(name)
-            self._new_entry.delete(0, "end")
-            self._new_entry.pack_forget()
-            self._create_btn.pack_forget()
-            self._new_btn.pack(anchor="w")
-            self._status.config(text=f'Deck "{name}" created.', fg=_GREEN)
-        else:
-            self._status.config(text=result["error"], fg=_RED)
-        self._create_btn.config(state="normal", text="Create")
+    def _apply_create_result(self, result: dict):
+        try:
+            if result["success"]:
+                name = self._pending_deck_name
+                self._combo.addItem(name)
+                self._combo.setCurrentText(name)
+                self._new_entry.clear()
+                self._new_entry.hide()
+                self._create_btn.hide()
+                self._new_btn.show()
+                self._status.setText(f'Deck "{name}" created.')
+                self._status.setStyleSheet(f"color: {Theme.GREEN};")
+            else:
+                self._status.setText(result["error"])
+                self._status.setStyleSheet(f"color: {Theme.RED};")
+        except Exception:
+            logger.exception("Failed to apply deck-create result: %r", result)
+            self._status.setText("Unexpected error creating deck.")
+            self._status.setStyleSheet(f"color: {Theme.RED};")
+        self._create_btn.setEnabled(True)
+        self._create_btn.setText("Create")
 
     # ── connect to Anki ───────────────────────────────────────────────
-    def _on_decks_loaded(self, anki_ok, decks):
-        self._combo.config(state="normal")
+    def _on_decks_loaded(self, anki_ok: bool, decks: list):
+        self._combo.clear()
+        self._combo.setEnabled(True)
         if decks:
-            self._combo["values"] = decks
-            self._combo.set(decks[0])
-            self._status.config(text="", fg=_MUTED)
+            self._combo.addItems(decks)
+            self._status.setText("")
         elif anki_ok:
-            self._combo.set("Default")
-            self._status.config(text="No decks found — type a name to create one.", fg=_MUTED)
+            self._combo.addItem("Default")
+            self._status.setText("No decks found — type a name to create one.")
+            self._status.setStyleSheet(f"color: {Theme.MUTED_FG};")
         else:
-            self._combo.set("Default")
-            self._status.config(
-                text="Could not start Anki. Is it installed with AnkiConnect?",
-                fg=_RED,
-            )
+            self._combo.addItem("Default")
+            self._status.setText("Could not start Anki. Is it installed with AnkiConnect?")
+            self._status.setStyleSheet(f"color: {Theme.RED};")
 
     # ── save ──────────────────────────────────────────────────────────
     def _on_save(self):
-        deck_name = self._combo.get().strip()
+        deck_name = self._combo.currentText().strip()
         if not deck_name:
-            self._status.config(text="Enter a deck name.", fg=_RED)
+            self._status.setText("Enter a deck name.")
+            self._status.setStyleSheet(f"color: {Theme.RED};")
             return
 
-        self._save_btn.config(state="disabled", text="Saving…")
-
-        def on_result(result):
-            self._master.after(0, lambda: self._apply_save_result(result))
-
+        self._save_btn.setEnabled(False)
+        self._save_btn.setText("Saving…")
         self._controller.save_to_anki(
-            self._word, deck_name, self._src_lang, on_ready=on_result,
+            self._word, deck_name, self._src_lang, on_ready=self._save_finished.emit,
         )
 
-    def _apply_save_result(self, result):
-        if result["success"]:
-            self._status.config(text="Saved!", fg=_GREEN)
-            if self._on_saved:
-                self._on_saved()
-            self._dialog.after(800, self._dialog.destroy)
-        else:
-            self._status.config(text=result["error"], fg=_RED)
-            self._save_btn.config(state="normal", text="Save")
+    def _apply_save_result(self, result: dict):
+        try:
+            if result["success"]:
+                self._status.setText("Saved!")
+                self._status.setStyleSheet(f"color: {Theme.GREEN};")
+                self.saved.emit()
+                self.accept()
+            else:
+                self._status.setText(result["error"])
+                self._status.setStyleSheet(f"color: {Theme.RED};")
+                self._save_btn.setEnabled(True)
+                self._save_btn.setText("Save")
+        except Exception:
+            logger.exception("Failed to apply Anki save result: %r", result)
+            self._status.setText("Unexpected error saving note.")
+            self._status.setStyleSheet(f"color: {Theme.RED};")
+            self._save_btn.setEnabled(True)
+            self._save_btn.setText("Save")
